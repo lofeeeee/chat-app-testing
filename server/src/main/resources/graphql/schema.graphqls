@@ -1,0 +1,631 @@
+"""
+Singular GraphQL API — phase 1.
+
+Every id is a 64-bit snowflake serialised as a STRING. JavaScript silently corrupts integers
+above 2^53, which is exactly why Discord quotes every id in their API too.
+"""
+
+scalar Snowflake
+scalar DateTime
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+type User {
+  id: Snowflake!
+  username: String!
+  discriminator: Int!
+  "Rendered form, e.g. alex#0971. Used to find and add people — never to sign in."
+  handle: String!
+  "Free-form, non-unique. This is what the UI shows."
+  displayName: String
+  avatarKey: String
+  bannerKey: String
+  bio: String
+  accentColor: Int
+  "Decorative frame drawn around the avatar."
+  borderKey: String
+  pronouns: String
+  createdAt: DateTime!
+  presence: Presence!
+  "Feature 17. What they're playing or listening to right now, if anything."
+  richPresence: RichPresence
+  "True when the viewer has blocked this person."
+  blockedByViewer: Boolean!
+}
+
+enum ChannelType {
+  DM
+  GROUP_DM
+  GUILD_TEXT
+  GUILD_CATEGORY
+  GUILD_VOICE
+}
+
+type Channel {
+  id: Snowflake!
+  type: ChannelType!
+  "NULL for 1:1 DMs — the client renders the other member's name instead."
+  name: String
+  iconKey: String
+  members: [User!]!
+  lastMessageId: Snowflake
+  createdAt: DateTime!
+}
+
+type Message {
+  id: Snowflake!
+  channelId: Snowflake!
+  author: User!
+  content: String
+  replyToId: Snowflake
+  createdAt: DateTime!
+  editedAt: DateTime
+  """
+  True when the viewer has blocked the author but shares this channel with them.
+  Content is still delivered so the client can reveal it instantly on tap, without a
+  second round trip. In DMs a block prevents delivery entirely, so this is always false.
+  """
+  authorBlocked: Boolean!
+  "Parsed from the body at send time — drives notification fanout and the mentions inbox."
+  mentions: [Mention!]!
+}
+
+"Backwards cursor pagination: pass the oldest id you hold as `before`."
+type MessagePage {
+  nodes: [Message!]!
+  nextCursor: Snowflake
+  hasMore: Boolean!
+}
+
+type AuthPayload {
+  accessToken: String!
+  "Opaque, rotates on every use. Store it in the OS keystore, never in plain preferences."
+  refreshToken: String!
+  expiresInSeconds: Int!
+  user: User!
+}
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+
+input RegisterInput {
+  username: String!
+  email: String!
+  password: String!
+  displayName: String
+  deviceId: String
+}
+
+input LoginInput {
+  """
+  Email address. Handles are not credentials — they are how people find and add each other,
+  they are meant to be shared publicly, and the discriminator is reallocated on rename.
+  """
+  email: String!
+  password: String!
+  deviceId: String
+}
+
+input SendMessageInput {
+  channelId: Snowflake!
+  content: String!
+  "Ids from finalizeUpload. Each may only ever be attached to one message."
+  attachmentIds: [Snowflake!]
+  replyToId: Snowflake
+  """
+  Client-generated idempotency key. Resending the same nonce returns the original message
+  instead of creating a duplicate — which is what makes retry-on-flaky-connection safe.
+  """
+  nonce: String
+}
+
+# ---------------------------------------------------------------------------
+# Operations
+# ---------------------------------------------------------------------------
+
+type Query {
+  me: User
+  user(id: Snowflake!): User
+  userByHandle(username: String!, discriminator: Int!): User
+  channels: [Channel!]!
+  channel(id: Snowflake!): Channel
+  messages(channelId: Snowflake!, before: Snowflake, limit: Int = 50): MessagePage!
+}
+
+type Mutation {
+  register(input: RegisterInput!): AuthPayload!
+  login(input: LoginInput!): AuthPayload!
+  "Rotates the refresh token. Presenting an already-rotated token revokes the whole session family."
+  refresh(refreshToken: String!): AuthPayload!
+  logout(refreshToken: String!): Boolean!
+
+  "Get-or-create. Calling it twice for the same pair returns the same channel."
+  openDirectMessage(userId: Snowflake!): Channel!
+  sendMessage(input: SendMessageInput!): Message!
+  markRead(channelId: Snowflake!, messageId: Snowflake!): Boolean!
+  """
+  Announce that you're typing. Fire-and-forget; call it at most every few seconds while the
+  user is actually typing, not on every keystroke.
+  """
+  startTyping(channelId: Snowflake!): Boolean!
+}
+
+"""
+Someone in the channel started typing.
+
+There is no matching "stopped" event on purpose: typing usually ends by a window closing or a
+network dropping, neither of which sends anything. Clients expire the indicator on a timer.
+"""
+type TypingEvent {
+  channelId: Snowflake!
+  user: User!
+  at: DateTime!
+}
+
+type Subscription {
+  messageCreated(channelId: Snowflake!): Message!
+  """
+  Typing notices for a channel, excluding your own — the server filters them out so every
+  client doesn't have to remember to.
+  """
+  typing(channelId: Snowflake!): TypingEvent!
+}
+
+# ---------------------------------------------------------------------------
+# Session management
+# ---------------------------------------------------------------------------
+
+enum SessionOrigin {
+  PASSWORD
+  QR_CODE
+  REFRESH
+}
+
+"""
+One entry in "where you're signed in".
+
+Keyed by the rotation family, not by session id: a refresh mints a new session row every 15
+minutes, so listing raw sessions would show the same laptop dozens of times a day.
+"""
+type DeviceSession {
+  id: Snowflake!
+  deviceId: String!
+  platform: String
+  userAgent: String
+  ipAddress: String
+  origin: SessionOrigin!
+  firstSeenAt: DateTime!
+  lastSeenAt: DateTime!
+  "True for the session making this request — the client must not offer to revoke it as 'other'."
+  current: Boolean!
+}
+
+# ---------------------------------------------------------------------------
+# QR sign-in
+# ---------------------------------------------------------------------------
+
+enum LoginRequestStatus {
+  PENDING
+  SCANNED
+  APPROVED
+  DENIED
+  EXPIRED
+  CONSUMED
+}
+
+type LoginRequest {
+  id: Snowflake!
+  "Encode exactly this string in the QR. Rotates every `rotateAfterSeconds`."
+  qrPayload: String!
+  status: LoginRequestStatus!
+  tokenExpiresAt: DateTime!
+  expiresAt: DateTime!
+  "How long the client should display a code before calling rotateLoginToken."
+  rotateAfterSeconds: Int!
+}
+
+type NewLoginRequest {
+  request: LoginRequest!
+  """
+  Held privately by the requesting device and never displayed. It authenticates the
+  loginRequestUpdated subscription, which is what lets the QR token rotate without dropping
+  the channel that eventually carries the tokens.
+  """
+  pollSecret: String!
+}
+
+"""
+What the scanning phone sees before deciding.
+
+This screen is the security control, not decoration: rotating the code does nothing against
+an attacker who tricks someone into scanning *their* QR, so the user has to be shown which
+device, from which address, they are about to admit.
+"""
+type ScannedLoginRequest {
+  id: Snowflake!
+  ipAddress: String
+  platform: String
+  userAgent: String
+  requestedAt: DateTime!
+}
+
+type LoginRequestEvent {
+  status: LoginRequestStatus!
+  approvedBy: User
+  "Present exactly once, on approval, only on the poll-secret-authenticated channel."
+  auth: AuthPayload
+}
+
+extend type Query {
+  "Devices currently signed in as you."
+  sessions: [DeviceSession!]!
+}
+
+extend type Mutation {
+  "Signs one device out. Revokes its whole rotation family, so a descendant token can't survive."
+  revokeSession(id: Snowflake!): Boolean!
+  "Signs out everywhere except the device making this call. Returns how many were revoked."
+  revokeOtherSessions: Int!
+
+  "Called by the device that wants to sign in. No authentication required."
+  createLoginRequest(deviceId: String, platform: String): NewLoginRequest!
+  "Swaps in the next QR code. Stops having an effect once a phone has scanned."
+  rotateLoginToken(id: Snowflake!, pollSecret: String!): LoginRequest!
+
+  "Called by an already signed-in phone. Does NOT sign anyone in — it opens the approval screen."
+  claimLoginRequest(qrToken: String!): ScannedLoginRequest!
+  approveLoginRequest(id: Snowflake!): Boolean!
+  denyLoginRequest(id: Snowflake!): Boolean!
+}
+
+extend type Subscription {
+  "The requesting device's channel. Authenticated by pollSecret, not by a bearer token."
+  loginRequestUpdated(id: Snowflake!, pollSecret: String!): LoginRequestEvent!
+}
+
+# ---------------------------------------------------------------------------
+# Presence, blocking, muting, settings
+# ---------------------------------------------------------------------------
+
+"""
+INVISIBLE never reaches anyone but the user who chose it — everyone else is told OFFLINE.
+An invisible state that leaks as its own value is not invisible.
+"""
+enum PresenceStatus {
+  ONLINE
+  AWAY
+  DND
+  INVISIBLE
+  OFFLINE
+}
+
+type Presence {
+  userId: Snowflake!
+  status: PresenceStatus!
+  customText: String
+  customEmoji: String
+}
+
+enum ChatLayout {
+  "WhatsApp-style: bubbles, your messages on the right, time inside the bubble."
+  BUBBLES
+  "Discord-style: no bubbles, everything left-aligned, denser."
+  COMPACT
+}
+
+type UserSettings {
+  chatLayout: ChatLayout!
+  "0xRRGGBB, or null for the app default."
+  themePrimary: Int
+  themeSecondary: Int
+  "null follows the operating system."
+  themeDark: Boolean
+}
+
+input SettingsInput {
+  chatLayout: ChatLayout
+  themePrimary: Int
+  themeSecondary: Int
+  themeDark: Boolean
+}
+
+extend type Query {
+  settings: UserSettings!
+  "People you've blocked."
+  blockedUsers: [User!]!
+}
+
+extend type Mutation {
+  setStatus(status: PresenceStatus!): Presence!
+  setCustomStatus(text: String, emoji: String, expiresAt: DateTime): Presence!
+  "Keeps you online. Clients call this every ~30s while connected."
+  heartbeat: Boolean!
+
+  "Hides their messages everywhere and stops DM delivery between you."
+  blockUser(userId: Snowflake!): Boolean!
+  unblockUser(userId: Snowflake!): Boolean!
+
+  "Silences notifications. Content stays visible — that's what makes it different from a block."
+  muteUser(userId: Snowflake!, until: DateTime): Boolean!
+  unmuteUser(userId: Snowflake!): Boolean!
+  muteChannel(channelId: Snowflake!, until: DateTime): Boolean!
+  unmuteChannel(channelId: Snowflake!): Boolean!
+
+  updateSettings(input: SettingsInput!): UserSettings!
+
+  """
+  Feature 13. Every field is optional and null means "leave it alone", so a client changing
+  one thing never has to resend the rest.
+  """
+  updateProfile(
+    displayName: String
+    avatarKey: String
+    bannerKey: String
+    borderKey: String
+    bio: String
+    pronouns: String
+    accentColor: Int
+  ): User!
+}
+
+extend type Subscription {
+  "Presence changes for anyone. INVISIBLE is already collapsed to OFFLINE before it's sent."
+  presenceChanged: Presence!
+}
+
+# ---------------------------------------------------------------------------
+# Servers, roles, permissions, folders, mentions
+# ---------------------------------------------------------------------------
+
+type Guild {
+  id: Snowflake!
+  name: String!
+  iconKey: String
+  bannerKey: String
+  description: String
+  ownerId: Snowflake!
+  requires2faForModeration: Boolean!
+  createdAt: DateTime!
+  channels: [Channel!]!
+  roles: [Role!]!
+  "Your own membership — nickname, roles, timeout."
+  me: GuildMember
+  "What you can do here, as a decimal string. 128-bit, so it will not fit a JSON number."
+  myPermissions: String!
+}
+
+type Role {
+  id: Snowflake!
+  guildId: Snowflake!
+  name: String!
+  color: Int
+  iconKey: String
+  "Higher outranks. You may only manage roles strictly below your own highest."
+  position: Int!
+  "128-bit bitfield as a decimal string."
+  permissions: String!
+  "Show members with this role separately in the member list."
+  hoist: Boolean!
+  mentionable: Boolean!
+  "True for @everyone, whose id equals the guild id and which cannot be deleted."
+  isDefault: Boolean!
+}
+
+type GuildMember {
+  guildId: Snowflake!
+  user: User!
+  "Per-server nickname. Falls back to the display name when unset."
+  nickname: String
+  "What to actually show here: nickname, else display name, else username."
+  displayName: String!
+  avatarKey: String
+  roles: [Role!]!
+  joinedAt: DateTime!
+  timedOutUntil: DateTime
+}
+
+type Invite {
+  code: String!
+  guildId: Snowflake!
+  channelId: Snowflake
+  inviterId: Snowflake
+  uses: Int!
+  maxUses: Int
+  expiresAt: DateTime
+}
+
+"One folder in the server rail. Per-user only — nobody else sees your arrangement."
+type GuildFolder {
+  id: String!
+  name: String
+  color: Int
+  guildIds: [Snowflake!]!
+}
+
+type FolderLayout {
+  folders: [GuildFolder!]!
+  "Servers not filed in a folder, in your chosen order."
+  loose: [Snowflake!]!
+}
+
+input GuildFolderInput {
+  id: String!
+  name: String
+  color: Int
+  guildIds: [Snowflake!]!
+}
+
+enum MentionType { USER, ROLE, EVERYONE, HERE }
+
+type Mention {
+  type: MentionType!
+  targetId: Snowflake
+}
+
+type PermissionFlag {
+  name: String!
+  bit: Int!
+  label: String!
+}
+
+extend type Query {
+  guilds: [Guild!]!
+  guild(id: Snowflake!): Guild
+  guildMembers(guildId: Snowflake!, limit: Int = 100): [GuildMember!]!
+  invites(guildId: Snowflake!): [Invite!]!
+  folders: FolderLayout!
+  "Every permission flag with its bit, so a client can render a permissions editor."
+  permissionFlags: [PermissionFlag!]!
+  "Messages that mention you, newest first."
+  mentionInbox(limit: Int = 50): [Message!]!
+}
+
+extend type Mutation {
+  createGuild(name: String!, iconKey: String): Guild!
+  updateGuild(id: Snowflake!, name: String, iconKey: String, description: String): Guild!
+  deleteGuild(id: Snowflake!): Boolean!
+  leaveGuild(id: Snowflake!): Boolean!
+
+  createGuildChannel(guildId: Snowflake!, name: String!, type: ChannelType, parentId: Snowflake): Channel!
+
+  createRole(guildId: Snowflake!, name: String!, color: Int): Role!
+  "Permissions is a decimal string. You cannot grant a flag you don't hold yourself."
+  updateRole(roleId: Snowflake!, name: String, color: Int, permissions: String, hoist: Boolean, mentionable: Boolean): Role!
+  deleteRole(roleId: Snowflake!): Boolean!
+  assignRole(guildId: Snowflake!, userId: Snowflake!, roleId: Snowflake!): Boolean!
+  unassignRole(guildId: Snowflake!, userId: Snowflake!, roleId: Snowflake!): Boolean!
+
+  "Feature 14. Pass null to clear it and fall back to the display name."
+  setNickname(guildId: Snowflake!, userId: Snowflake, nickname: String): Boolean!
+
+  kickMember(guildId: Snowflake!, userId: Snowflake!): Boolean!
+  timeoutMember(guildId: Snowflake!, userId: Snowflake!, until: DateTime): Boolean!
+
+  setChannelOverwrite(channelId: Snowflake!, targetId: Snowflake!, targetType: Int!, allow: String!, deny: String!): Boolean!
+  clearChannelOverwrite(channelId: Snowflake!, targetId: Snowflake!): Boolean!
+
+  createInvite(guildId: Snowflake!, channelId: Snowflake, maxUses: Int, expiresAt: DateTime): Invite!
+  redeemInvite(code: String!): Guild!
+  deleteInvite(code: String!): Boolean!
+
+  "Feature 18. Replaces the whole layout — the client owns the arrangement."
+  saveFolders(folders: [GuildFolderInput!]!, loose: [Snowflake!]!): FolderLayout!
+}
+
+# ---------------------------------------------------------------------------
+# Media, stories, rich presence, push registration
+# ---------------------------------------------------------------------------
+
+enum AttachmentKind { FILE, IMAGE, VIDEO, AUDIO, VOICE_NOTE }
+enum AttachmentStatus { PENDING, READY, FAILED }
+
+type Attachment {
+  id: Snowflake!
+  filename: String!
+  contentType: String!
+  sizeBytes: String!
+  kind: AttachmentKind!
+  status: AttachmentStatus!
+  width: Int
+  height: Int
+  durationMs: Int
+  "Peaks 0-100, precomputed so the client draws a waveform without decoding the file."
+  waveform: [Int!]!
+  "Time-limited. Re-fetch rather than storing it — the signature expires."
+  url: String
+  thumbnailUrl: String
+}
+
+"""
+An upload slot. PUT the bytes straight to `uploadUrl`, then call finalizeUpload.
+
+Bytes never pass through this server: it signs a URL, and verifies afterwards that what
+arrived matches what was declared.
+"""
+type UploadSlot {
+  attachment: Attachment!
+  uploadUrl: String!
+}
+
+type Location {
+  latitude: Float!
+  longitude: Float!
+  label: String
+  "Set for live location; the pin stops updating after this."
+  expiresAt: DateTime
+}
+
+type Story {
+  id: Snowflake!
+  author: User!
+  attachment: Attachment
+  background: String
+  "Positioned elements — text, stickers, mentions, music, location — composited by the client."
+  overlays: String!
+  createdAt: DateTime!
+  expiresAt: DateTime!
+  viewCount: Int!
+  "Whether you've already watched it."
+  seen: Boolean!
+}
+
+type RichPresence {
+  userId: Snowflake!
+  activityType: String!
+  name: String!
+  details: String
+  state: String
+  largeImageKey: String
+  startedAt: DateTime
+  endsAt: DateTime
+}
+
+enum PushPlatform { FCM, APNS, WEB_PUSH }
+
+extend type Message {
+  attachments: [Attachment!]!
+  location: Location
+}
+
+extend type Query {
+  "Live stories from the people you share conversations with."
+  storyFeed: [Story!]!
+  story(id: Snowflake!): Story
+  "Who watched. Author only."
+  storyViewers(storyId: Snowflake!): [User!]!
+}
+
+extend type Mutation {
+  """
+  Step 1 of an upload. Declare the file, get a signed PUT back.
+  Content type and length are signed into the URL, so the bytes must match the declaration.
+  """
+  createUpload(filename: String!, contentType: String!, sizeBytes: String!, voiceNote: Boolean): UploadSlot!
+
+  """
+  Step 3. The server HEADs the object, checks the size, strips EXIF from images and builds a
+  thumbnail. An attachment is unusable until this succeeds.
+  """
+  finalizeUpload(attachmentId: Snowflake!, durationMs: Int, waveform: [Int!]): Attachment!
+
+  sendLocation(channelId: Snowflake!, latitude: Float!, longitude: Float!, label: String, expiresAt: DateTime): Message!
+
+  createStory(attachmentId: Snowflake, background: String, overlays: String, audienceMode: String, audienceUserIds: [Snowflake!]): Story!
+  deleteStory(id: Snowflake!): Boolean!
+  markStorySeen(id: Snowflake!): Boolean!
+
+  "Feature 17. Volatile — never persisted, cleared when you disconnect."
+  setRichPresence(activityType: String!, name: String!, details: String, state: String, largeImageKey: String, endsAt: DateTime): Boolean!
+  clearRichPresence: Boolean!
+
+  "Feature 7. Registration works now; delivery needs FCM and APNs credentials."
+  registerPushToken(platform: PushPlatform!, token: String!, deviceId: String): Boolean!
+  unregisterPushToken(token: String!): Boolean!
+}
+
+extend type Subscription {
+  richPresenceChanged: RichPresence!
+}

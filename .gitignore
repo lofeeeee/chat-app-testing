@@ -1,0 +1,14 @@
+.gradle/
+build/
+out/
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+local.properties
+.idea/
+*.iml
+.kotlin/
+.DS_Store
+Thumbs.db
+*.log
+.env

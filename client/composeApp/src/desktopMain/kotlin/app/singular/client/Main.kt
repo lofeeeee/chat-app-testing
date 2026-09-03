@@ -1,0 +1,78 @@
+package app.singular.client
+
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.application
+import androidx.compose.ui.window.rememberWindowState
+import java.io.File
+import java.util.UUID
+
+fun main() = application {
+    Window(
+        onCloseRequest = ::exitApplication,
+        title = "Singular",
+        state = rememberWindowState(size = DpSize(1180.dp, 780.dp)),
+    ) {
+        // Point at another host with -Dsingular.server=https://chat.example.com
+        val host = System.getProperty("singular.server")
+        App(
+            httpUrl = host?.let { "$it/graphql" } ?: SingularDefaults.HTTP,
+            wsUrl = host?.let { "${it.replaceFirst("http", "ws")}/graphql" } ?: SingularDefaults.WS,
+        )
+    }
+}
+
+private object SingularDefaults {
+    const val HTTP = "http://localhost:8080/graphql"
+    const val WS = "ws://localhost:8080/graphql"
+}
+
+actual fun deviceId(): String = DeviceIdStore.current()
+
+/**
+ * Desktop install id.
+ *
+ * A file under the user's config directory, not a MAC address — see the note on the expect
+ * declaration. Phase 5 moves this into DPAPI on Windows and the Keychain on macOS so it can't
+ * be copied between machines to impersonate a device.
+ */
+private object DeviceIdStore {
+    private val file: File by lazy {
+        val base = when {
+            System.getProperty("os.name").startsWith("Windows") ->
+                File(System.getenv("APPDATA") ?: System.getProperty("user.home"), "Singular")
+            System.getProperty("os.name").startsWith("Mac") ->
+                File(System.getProperty("user.home"), "Library/Application Support/Singular")
+            else ->
+                File(System.getProperty("user.home"), ".config/singular")
+        }
+        base.mkdirs()
+        File(base, "device-id")
+    }
+
+    fun current(): String {
+        if (file.exists()) {
+            file.readText().trim().takeIf { it.isNotEmpty() }?.let { return it }
+        }
+        val fresh = UUID.randomUUID().toString()
+        runCatching { file.writeText(fresh) }
+        return fresh
+    }
+}
+
+/**
+ * Reported to the server and shown on the approving device's confirmation screen, so "Windows
+ * desktop, from 203.0.113.9" is what a user is asked to trust — not a user-agent string.
+ */
+actual val platformName: String = buildString {
+    val os = System.getProperty("os.name") ?: "Unknown"
+    append(
+        when {
+            os.startsWith("Windows") -> "Windows"
+            os.startsWith("Mac") -> "macOS"
+            else -> os
+        }
+    )
+    append(" desktop")
+}

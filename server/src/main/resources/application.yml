@@ -1,0 +1,91 @@
+spring:
+  application:
+    name: singular
+
+  threads:
+    virtual:
+      enabled: true          # blocking JDBC is fine when the carrier thread doesn't park
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/singular}
+    username: ${DB_USER:singular}
+    password: ${DB_PASSWORD:singular-dev-only}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX:20}
+      minimum-idle: 4
+      # Virtual threads make it cheap to have many in-flight requests, but the pool is still the
+      # real concurrency limit against Postgres. Keep it well under max_connections.
+      connection-timeout: 5000
+      leak-detection-threshold: 10000
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  graphql:
+    path: /graphql
+    graphiql:
+      enabled: ${GRAPHIQL_ENABLED:true}   # turn this off outside development
+      path: /graphiql
+    websocket:
+      path: /graphql
+      connection-init-timeout: 30s
+    schema:
+      locations: classpath:graphql/
+      printer:
+        enabled: false
+
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+  # Behind a reverse proxy this is how the real client IP reaches connection_sessions.
+  forward-headers-strategy: framework
+
+singular:
+  # MUST be unique per running instance, 0-1023. Two nodes sharing an id will mint duplicate
+  # snowflakes, which corrupts primary keys silently.
+  node-id: ${SINGULAR_NODE_ID:1}
+
+  auth:
+    # HMAC key for stateless access tokens. Replace before any deployment.
+    token-secret: ${SINGULAR_TOKEN_SECRET:dev-only-insecure-token-secret-change-me-now}
+    access-token-ttl: PT15M
+    refresh-token-ttl: P30D
+
+  crypto:
+    # Server pepper for blind indexes (email lookup). Changing this orphans every existing
+    # email index entry — treat it as permanent once you have users.
+    pepper: ${SINGULAR_PEPPER:dev-only-insecure-pepper-change-me-now}
+
+  limits:
+    message-max-length: 4000
+    messages-page-size-max: 100
+
+  storage:
+    endpoint: ${MINIO_ENDPOINT:http://localhost:9100}
+    region: ${MINIO_REGION:us-east-1}
+    bucket: ${MINIO_BUCKET:singular}
+    access-key: ${MINIO_ACCESS_KEY:singular}
+    secret-key: ${MINIO_SECRET_KEY:singular-dev-only}
+    # MinIO needs path-style addressing; real S3 prefers virtual-host style.
+    path-style: ${MINIO_PATH_STYLE:true}
+    upload-url-ttl: PT10M
+    download-url-ttl: PT1H
+
+  media:
+    max-upload-bytes: ${MEDIA_MAX_BYTES:104857600}   # 100 MiB
+    max-image-bytes: ${MEDIA_MAX_IMAGE_BYTES:26214400}
+    thumbnail-max-edge: 320
+    story-ttl: PT24H
+
+logging:
+  level:
+    app.singular: ${LOG_LEVEL:DEBUG}
+    org.springframework.graphql: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics

@@ -1,0 +1,76 @@
+# Local development services. All self-hosted, no managed cloud anything.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: singular-db
+    environment:
+      POSTGRES_DB: singular
+      POSTGRES_USER: singular
+      POSTGRES_PASSWORD: singular-dev-only
+      # Deterministic ordering so lower(username) indexes behave identically everywhere.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U singular -d singular"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      # Partition pruning at execution time, not just planning time.
+      - -c
+      - enable_partitionwise_join=on
+      - -c
+      - enable_partitionwise_aggregate=on
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: singular-cache
+    # 6380 for the same reason as MinIO's 9100 — 6379 is commonly already taken.
+    ports: ["6380:6379"]
+    # Presence and typing state is disposable by design — no persistence, no AOF.
+    command: ["valkey-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    container_name: singular-blobs
+    environment:
+      MINIO_ROOT_USER: singular
+      MINIO_ROOT_PASSWORD: singular-dev-only
+      # The minio image ships MINIO_ROOT_USER_FILE / MINIO_ROOT_PASSWORD_FILE as *image
+      # defaults*, pointing at docker secrets that don't exist here. When they are set, the
+      # entrypoint reads them instead of the plain variables above — so the credentials you
+      # configured are silently ignored and the server falls back to minioadmin/minioadmin.
+      # Clearing them is what makes MINIO_ROOT_USER actually take effect.
+      MINIO_ROOT_USER_FILE: ""
+      MINIO_ROOT_PASSWORD_FILE: ""
+      MINIO_ACCESS_KEY_FILE: ""
+      MINIO_SECRET_KEY_FILE: ""
+    # Deliberately NOT the default 9000/9001. Another project on this machine already
+    # publishes those, and a port clash here does not fail loudly — Docker starts the
+    # container without publishing, the app connects to whatever else is on 9000, and you
+    # get authentication errors that look like bad credentials rather than a wrong server.
+    ports:
+      - "9100:9000"   # S3 API
+      - "9101:9001"   # console
+    volumes:
+      - miniodata:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
+  miniodata:
