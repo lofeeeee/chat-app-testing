@@ -1,0 +1,415 @@
+Singular.
+WORKING NAME  /  ARCHITECTURE BLUEPRINT  /  REV A
+A build plan for a multiplatform chat platform — servers with roles, private and group DMs, ephemeral stories, presence, forensic audit logging — with no browser inside the binary and no runtime dependency on anyone else's servers.
+
+Client
+Compose Multiplatform
+Server
+Kotlin + Spring Boot
+API
+GraphQL + graphql-ws
+Store
+PostgreSQL 17
+Ephemeral
+Valkey
+Blobs
+MinIO
+Deps
+All vendored
+Ground rule
+Everything is vendored and self-hosted
+No CDN links, no runtime downloads, no webfonts fetched at startup, no managed cloud service you can't run yourself. Every dependency is a versioned artifact resolved at build time and shipped inside the binary or the container image. The good news: the entire stack below already satisfies this. Postgres, Valkey, MinIO, Meilisearch and ClickHouse are all self-hosted single binaries or containers.
+
+Concern	Rule	How
+Fonts	Bundled	Ship .ttf/.otf files in the app resources and register them with Compose's FontFamily. Never a Google Fonts URL.
+JVM libraries	Vendored	Gradle with a version catalog, dependency locking, and an internal Maven mirror (Nexus or Artifactory) so builds don't reach Maven Central.
+Icons & emoji	Bundled	Ship a Twemoji or Noto Emoji sprite sheet in resources. Do not rely on OS emoji fonts — they differ per platform and Windows renders many glyphs badly.
+Storage	MinIO	S3-compatible, self-hosted, one binary. You keep the S3 API so moving to real S3 later is a config change, not a rewrite.
+Geo-IP lookup	Local DB	MaxMind GeoLite2 or DB-IP as a local .mmdb file, updated on your schedule. Never a per-request lookup API.
+Push delivery	Unavoidable	FCM and APNs are the only paths to a sleeping phone — Apple and Google own the sockets. Isolate this behind one PushTransport interface so it's the single external edge, and make it degrade to in-app-only when unreachable.
+Music metadata	Optional edge	Only needed if you want the story music sticker to search a catalogue. Can be made fully local by restricting it to user-uploaded audio. See the stories section.
+Before anything else
+Three things in the brief won't work as written
+None are fatal, but each changes what you build, so they come first.
+
+Correction 01 — the frontend
+Spring Boot cannot be your frontend. It's a JVM server framework — no UI toolkit, no renderer, and nothing that runs on iOS or Android. What you're describing (one codebase, desktop + web + mobile, no webview) is exactly Compose Multiplatform, and it's Kotlin, so it shares models, validation and generated GraphQL types with your backend.
+
+Keep Spring Boot. Move it to the backend, where you wanted Kotlin anyway.
+
+Client option	Renders with	Desktop install	Idle RSS	Verdict
+Compose Multiplatform	Skia, direct to GPU	~70–90 MB (jlink)	~180–260 MB	Recommended
+Electron	Bundled Chromium	~150–250 MB	~400–700 MB	What you're avoiding
+Tauri	OS webview	~8–15 MB	~120–200 MB	Tiny, but still a webview
+Flutter	Impeller, direct to GPU	~40–60 MB	~120–200 MB	Great — but Dart, not Kotlin
+Compose Multiplatform is Stable on Android, iOS and desktop as of 1.8.0 (May 2025). The web target (Wasm) is still Beta and ships a multi-megabyte canvas bundle with poor text selection and SEO. If the browser has to be first-class on day one, plan a separate web client instead.
+
+Correction 02 — "every important data will be hashed"
+Hashing is one-way. Hash a message and you can never display it again. These are two different tools: hash what you only ever need to compare (passwords, session tokens); encrypt what you need to read back (message bodies, email, phone, files). Full breakdown in the security section.
+
+Correction 03 — MAC address logging
+You cannot get a client's MAC address over the internet. MAC addresses don't survive the first router hop. Browsers have no API for it; Android 10+ returns a fixed 02:00:00:00:00:00; iOS blocks it. Only a desktop native app can self-report one, and a self-report is trivially spoofed — so it's worthless as evidence anyway.
+
+Replace it with a device install ID: a random UUID generated on first launch, stored in the OS keystore (Keychain / Android Keystore / DPAPI), joined with coarse hardware hints (OS, version, CPU arch, screen metrics, locale, timezone). That gives you real device continuity, which is what you actually wanted.
+
+Your main question
+SQL or NoSQL
+Verdict
+Use PostgreSQL as the single source of truth. Add NoSQL only for the two jobs it's genuinely better at — ephemeral state and blobs.
+
+Your feature list is overwhelmingly relational. Roles, permission overwrites, memberships, blocks, mutes, folders, per-server nicknames — these are joins with hard integrity rules. Modelling them in a document store means reimplementing foreign keys and transactions in application code, and you will get it wrong in the permission checker, which is the one place where a bug is a security hole rather than an annoyance.
+
+"But Discord uses Cassandra"
+They do — and it's the most-cited reason people pick the wrong database for a chat app. Discord's path was MongoDB → Cassandra → ScyllaDB, and every move was forced by a wall you are nowhere near:
+
+Message count	What Postgres does	Action needed
+< 100 M	Single table, one index. Boring.	Nothing
+100 M – 5 B	Fine with monthly RANGE partitioning on snowflake ID.	Partition + BRIN
+5 B – 50 B	Works, but vacuum and index bloat need real attention.	Read replicas, archive cold partitions
+> 50 B	Single-node write ceiling: WAL contention, B-tree page churn.	Now move messages to ScyllaDB
+Discord crossed that line after years at hundreds of millions of users. Starting there costs you transactions, joins, ad-hoc queries and operational simplicity in exchange for headroom you will not touch. Partition messages from day one so the eventual migration is mechanical, and move on.
+
+The full storage layout
+Store	Holds	Why not Postgres
+PostgreSQL 17	Users, servers, channels, roles, overwrites, memberships, messages, blocks, mutes, relationships, story metadata, audit log	—
+Valkey	Presence & status, rich presence, typing indicators, WebSocket session registry, cross-node pub/sub fanout, rate limits, unread counters	Presence changes several times a minute per user. In Postgres that's pure write amplification with zero durability value — it's all disposable on restart anyway.
+MinIO	Avatars, banners, server icons, attachments, voice notes, story media	Blobs in a relational DB wreck your backup window, replication lag and buffer cache. Store the key, not the bytes.
+Meilisearch phase 6	Message search with from: / in: / has: filters	Start on Postgres tsvector + GIN. Only move when relevance ranking or typo tolerance becomes the actual complaint.
+ClickHouse only if needed	Raw telemetry firehose, if you keep per-event device logs	Columnar compression is 10–30× on this shape of data. Read the logging section first — you probably won't need it.
+Why Postgres specifically earns it here
+JSONB absorbs every genuinely schemaless field — story overlays, rich presence payloads, theme configs, server folder lists — so you get document flexibility exactly where it helps, with indexes.
+Native inet type stores an IPv4 in 7 bytes instead of 40 as text, with subnet operators free.
+LISTEN/NOTIFY covers your event bus until you outgrow it.
+PostGIS when location sharing gets real; pgvector if you ever add semantic search.
+Declarative partitioning is built in — no extension, no fork, no vendor.
+One binary, self-hosted, no license. Fits the offline rule perfectly.
+Core model
+Identity, IDs, and the shapes that matter
+Use snowflake IDs, not auto-increment
+A 64-bit snowflake gives you a globally unique, time-sortable, shard-friendly ID that carries its own creation timestamp. Sorting by ID is sorting by time — so your message pagination index is also your chronological index, and cursor pagination becomes trivial.
+
+// 64 bits, Twitter/Discord layout — pick your own epoch and never change it
+const val EPOCH = 1_735_689_600_000L   // 2025-01-01T00:00:00Z
+
+63 ─────────────────────────────────────────────── 0
+ │ 1 unused │ 41 bits: ms since epoch │ 10: node │ 12: seq │
+   sign       ~69 years of range        1024 nodes  4096/ms/node
+
+fun generate(): Long =
+  ((now() - EPOCH) shl 22) or (nodeId shl 12) or (seq++ and 0xFFF)
+Store as bigint. Serialise to JSON as a string — JavaScript clients silently corrupt integers above 2⁵³. That's exactly why every Discord ID is quoted in their API.
+
+Handles: the USERNAME#0971 system, researched
+Your recollection is correct. In Discord's legacy scheme the uniqueness constraint was on the pair (username, discriminator), not the username — up to 9,999 people could hold the same name. The discriminator was randomly drawn from whatever was still free for that specific name, and you never carried it with you. So Alex#0971 → rename to Sam → rename back to Alex hands you a fresh random draw, Alex#1239, because #0971 was released the moment you left and may already be taken.
+
+Discord killed it in 2023 (the "Pomelo" migration, force-completed March 2024) for three reasons worth knowing before you rebuild it: the 9,999 ceiling made popular names unusable, four digits are miserable to read aloud or type on mobile, and — the real one — it was an impersonation engine. Alex#0001 and Alex#7422 are indistinguishable at a glance in a member list.
+
+Recommendation — take the look, drop the trap
+Ship the #0971 aesthetic, but make the display name the mutable expressive one and keep a separate immutable handle underneath for mentions, blocks and audit records. Then rename collisions can't be used to impersonate, and you never hit the 9,999 wall. If you want pure legacy behaviour anyway, at minimum add a 30-day quarantine on released (name, discriminator) pairs so nobody can grab a freed handle the instant its owner renames.
+
+-- Uniqueness on the PAIR is the whole trick
+CREATE UNIQUE INDEX ux_handle ON users (lower(username), discriminator);
+
+-- Allocation. Random draws are ~free until the name gets crowded.
+suspend fun allocate(name: String): Short {
+  repeat(12) {
+    val d = Random.nextInt(1, 10_000).toShort()   // 0000 reserved for system accounts
+    if (tryInsert(name, d)) return d           // the unique index arbitrates the race
+  }
+  // Crowded name: enumerate. Worst case 9,999 smallints — one index-only scan.
+  val taken = takenDiscriminators(name)          // Set<Short>
+  val free  = (1..9999).filter { it.toShort() !in taken }
+  if (free.isEmpty()) throw NameExhausted(name)  // ← the wall Discord hit
+  return free.random().toShort()
+}
+Feature 10, researched
+The role & permission engine
+This is the most intricate system in the app and the one you must get exactly right. Discord's model is well-designed and worth copying closely. Three pieces:
+
+Piece 1
+Permissions are a bitfield
+Each capability is one bit. A role's entire permission set is a single integer. Checking is an AND; combining roles is an OR.
+
+Piece 2
+Roles are ordered
+Every role has a position. You may only edit, assign or moderate below your own highest role. This is what stops privilege escalation.
+
+Piece 3
+Channels override
+Per-channel allow/deny pairs targeting a role or a specific member, applied in a strict order on top of the base.
+
+Size the bitfield now, not later
+Discord blew past 53 bits (JS integer safety), then past 64, and had to re-serialise permissions as strings mid-flight. Start at 128 bits. In Postgres use bit(128) — it has native &, | and ~ operators — and serialise as a decimal string over GraphQL. You get ~80 spare flags for free and never repeat their migration.
+
+// Resolution order. Getting this sequence wrong IS the security bug.
+fun effectivePermissions(member: Member, channel: Channel): Bits {
+
+  if (member.id == guild.ownerId) return ALL              // 1. owner bypasses everything
+
+  var p = guild.everyoneRole.permissions                    // 2. base = @everyone …
+  member.roles.forEach { p = p or it.permissions }            //    … OR every role held
+
+  if (p has ADMINISTRATOR) return ALL                     // 3. admin bypasses ALL overwrites
+
+  val ow = channel.overwrites
+  ow[guild.everyoneRole.id]?.let {                           // 4. @everyone overwrite: deny, then allow
+    p = (p and it.deny.inv()) or it.allow
+  }
+
+  var allow = EMPTY; var deny = EMPTY                      // 5. role overwrites accumulate FIRST,
+  member.roles.forEach { r ->                                 //    then apply as one unit — so a grant on
+    ow[r.id]?.let { allow = allow or it.allow               //    any role beats a deny on another
+                       deny  = deny  or it.deny } }
+  p = (p and deny.inv()) or allow
+
+  ow[member.id]?.let {                                       // 6. member overwrite wins over everything
+    p = (p and it.deny.inv()) or it.allow
+  }
+
+  if (!(p has VIEW_CHANNEL)) return EMPTY                   // 7. can't see it → can't do anything in it
+  return p
+}
+Step 5 is the subtle one: role overwrites are unioned before being applied, not applied one at a time. Applying them sequentially makes the result depend on role order — which is wrong, and produces bugs nobody can reproduce.
+
+CREATE TABLE roles (
+  id            bigint  PRIMARY KEY,
+  guild_id      bigint  NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+  name          text    NOT NULL,
+  color         int,
+  icon_key      text,
+  position      int     NOT NULL,          -- hierarchy; ties broken by id
+  permissions   bit(128) NOT NULL DEFAULT repeat('0',128)::bit(128),
+  hoist         bool    NOT NULL DEFAULT false,  -- show separately in member list
+  mentionable   bool    NOT NULL DEFAULT false,
+  managed_by    bigint                        -- set if owned by an integration/bot
+);
+
+CREATE TABLE channel_overwrites (
+  channel_id  bigint   NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  target_id   bigint   NOT NULL,           -- a role id OR a user id
+  target_type smallint NOT NULL,           -- 0 = role, 1 = member
+  allow       bit(128) NOT NULL,
+  deny        bit(128) NOT NULL,
+  PRIMARY KEY (channel_id, target_id)
+);
+Performance and one cheap safeguard
+Never recompute this per message. Cache (user, channel) → bits in Valkey and invalidate on role edit, role assignment, overwrite change, or member leave. A role position change invalidates the whole guild — fine, it's rare.
+
+Also copy Discord's 2FA-required-for-moderation guild flag. It costs one boolean column and it is the single highest-value defence against a compromised moderator account nuking a server.
+
+Feature 9, corrected
+Hash this, encrypt that
+Data	Treatment	Algorithm	Why
+Password	Hash	Argon2id	19 MiB memory, t=2, p=1 as a floor. Don't reach for bcrypt on a greenfield build.
+Session / API token	Hash	SHA-256	Tokens are already high-entropy, so no KDF is needed. A DB leak then yields nothing usable.
+2FA recovery codes	Hash	SHA-256	Compared, never displayed twice.
+IP in audit log	Both	inet + HMAC index	Keep the real value encrypted for investigations; index an HMAC-SHA256 (server pepper) so you can match "same IP" without decrypting anything.
+Message body	Encrypt	AES-256-GCM	You must render it back. Hashing destroys it permanently.
+Email / phone	Encrypt	AES-256-GCM + blind index	Encrypt for display; keep an HMAC blind index for uniqueness checks and login lookup.
+Uploaded files	Encrypt	SSE or client-side	Plus a SHA-256 content hash for dedup and integrity — that hash is not a security control.
+Everything in flight	TLS 1.3	—	Certificate pinning on mobile.
+Envelope encryption, in one line
+Generate a random data key per message batch, encrypt content with it, encrypt that key with a master key held in a self-hosted HashiCorp Vault, and store the wrapped key beside the ciphertext. Rotating the master key then costs one re-wrap instead of rewriting every row you own.
+
+On end-to-end encryption
+You didn't ask for it, but "WhatsApp-like" implies it, so decide deliberately. The modern answer for group chat is MLS (RFC 9420) — an IETF standard since 2023, with production-grade implementations in OpenMLS and AWS's mls-rs, both self-contained libraries you vendor like anything else. Unlike Signal's Double Ratchet it handles large groups efficiently, which is exactly the Discord-server case.
+
+What E2EE costs you — read before committing
+Server-side search dies. The server can't index what it can't read. Search becomes client-local over synced history.
+Push notifications go contentless. You send an ID; the client wakes, fetches, decrypts. On iOS that needs a Notification Service Extension.
+Moderation and your audit log go blind to message content — which conflicts head-on with feature 8.
+Multi-device becomes a project of its own (device linking, key transparency, history transfer).
+Recommendation: ship TLS + at-rest encryption for v1. Add MLS later for private DMs and small group DMs only, as an opt-in toggle. Leave servers non-E2EE — they're semi-public spaces where moderation matters more, which is precisely the line Discord and Slack both drew.
+
+Feature 8 — you asked me to push back
+Per-message forensic logging: yes, it's too much
+Logging IP + geo + agent + device on every message is the one requirement I'd change. Here's the arithmetic for a room-temperature row: 8 B message ID, 8 B user ID, 19 B inet, 16 B coordinates, 16 B device ID, 8 B timestamp, ~40 B geo strings, ~120 B user agent — plus Postgres' 24-byte tuple header and alignment padding.
+
+Model	Cost per message	@ 1 M msg/day	Per year	@ 10 M msg/day
+Full row per message	~300 B + index ≈2×	~600 MB/day	~215 GB	~2.1 TB/yr
+Session FK per message	8 B	~8 MB/day	~3 GB	~29 GB/yr
+≈ 60–75× smaller, with zero loss of forensic detail.
+The fix — normalise, don't compress
+Write one connection_sessions row per connection, not per message: it holds the IP, geo, user agent, device ID and timestamps. Every message carries an 8-byte session_id. You can still answer "what IP sent message X, from what device, from where" — it's a join now instead of a duplicated row. When the IP changes mid-session (mobile handoff, VPN toggle) you close the row and open a new one, which is itself a useful signal.
+
+Then squeeze further, in this order: store IPs as inet not text; dictionary-encode user agents into a user_agents(id, hash, raw) table (a few thousand distinct strings will cover millions of sessions); store geo as a country/region FK plus optional precise coordinates. Only after all of that should you reach for ClickHouse.
+
+CREATE TABLE connection_sessions (
+  id            bigint PRIMARY KEY,
+  user_id       bigint NOT NULL,
+  device_id     uuid   NOT NULL,        -- keystore-backed install ID, NOT a MAC
+  ip            inet   NOT NULL,        -- 7 B for v4, 19 B for v6
+  ip_hmac       bytea  NOT NULL,        -- searchable without decrypting
+  asn           int,
+  ua_id         int    REFERENCES user_agents(id),
+  geo_country   char(2), geo_region text,   -- from a local GeoLite2 .mmdb file
+  geo_point     geography(Point,4326),  -- NULL unless the user shared precise location
+  started_at    timestamptz NOT NULL,
+  ended_at      timestamptz
+);
+
+-- Action audit: low volume, keep everything, partition by month
+CREATE TABLE audit_events (
+  id          bigint NOT NULL,
+  actor_id    bigint NOT NULL,
+  session_id  bigint REFERENCES connection_sessions(id),
+  action      smallint NOT NULL,      -- LOGIN, LOGOUT, PASSWORD_CHANGE, AVATAR_CHANGE,
+  target_type smallint,                -- ROLE_GRANT, BAN, CHANNEL_DELETE, …
+  target_id   bigint,
+  changes     jsonb,                   -- {"field": {"old": …, "new": …}}
+  occurred_at timestamptz NOT NULL,
+  PRIMARY KEY (id, occurred_at)
+) PARTITION BY RANGE (occurred_at);
+Two decisions I need from you
+Retention. My recommendation: sessions hot for 90 days then aggregated; audit events hot for 1 year then Parquet files on MinIO under a lifecycle rule. What's your actual requirement?
+Disclosure. IP + device + location is personal data under GDPR and its equivalents. That means a stated purpose, a retention limit, a privacy policy and an export/delete path — unavoidably before public launch. Is this going public, or staying private/self-hosted for a known group?
+Features 5 & 20
+Stories, and the music sticker problem
+The thing you couldn't name is a Story — Instagram's term; WhatsApp calls it Status. Same primitive: an ephemeral post that expires after 24 hours, with a viewer list, per-post audience control, and reactions that arrive as DMs.
+
+Model overlays as data, not as flattened pixels
+Don't bake stickers into the image. Store the media key plus an ordered list of overlay elements in JSONB and composite them client-side. Text, emoji, stickers, mentions, polls, location pins and the music widget then all share one uniform structure — and you can restyle or re-render them later without re-uploading anything. This is the clearest case in the whole app for a document field, and Postgres gives it to you without a second database.
+
+{
+  "media": { "key": "st/019.../v.mp4", "duration_ms": 8400, "w": 1080, "h": 1920 },
+  "overlays": [
+    { "type": "text", "x": .5, "y": .18, "rot": -4, "scale": 1.2,
+      "value": "back on the road", "style": "neon", "color": "#E0A34A" },
+    { "type": "music", "x": .5, "y": .82, "scale": 1, "style": "album_wave",
+      "source": "library", "track_id": "3n3P…", "isrc": "GBAYE0601498",
+      "title": "Teardrop", "artist": "Massive Attack",
+      "art_key": "art/3n3P.jpg", "clip_start_ms": 42000, "clip_len_ms": 15000 },
+    { "type": "mention", "x": .3, "y": .6, "user_id": "1042…" }
+  ],
+  "audience": { "mode": "except", "user_ids": ["108…","221…"] },
+  "expires_at": "2026-09-03T19:40:00Z"
+}
+The music sticker cannot work the way Instagram's does
+Instagram can play 15 seconds of a commercial track because Meta holds licensing deals with the major labels. You don't. Hosting or streaming clips of commercial music without a licence is straightforward copyright infringement — the kind that gets apps pulled from stores.
+
+It also got harder recently: Spotify deprecated preview_url for new applications (announced Nov 2024, made permanent in April 2026, with no replacement endpoint). Any tutorial you find using it is out of date.
+
+What to build instead — and it fits the offline rule better anyway
+User's own audio library. The fully-offline option: users attach audio they already have, or clip from the video's own soundtrack. Zero external calls, zero licensing exposure.
+Metadata + deep link, if you want a catalogue: show album art, title, artist and an animated waveform; tapping opens the track in the viewer's own music app. This is the one place a remote API creeps in — keep it behind a feature flag so the app works with it disabled.
+Match by ISRC so the same song resolves consistently across providers if you ever add more.
+Reuse the same track object for Discord-style "Listening to…" rich presence. One integration, two features.
+Expiry and cleanup
+Set a MinIO lifecycle rule to delete story media after 25 hours, so cleanup still happens if your reaper job dies. Keep the metadata row with expires_at, filter reads on it, and hard-delete nightly. Story views are the high-volume table here, not stories themselves — cap the retained viewer list and keep only a count after expiry.
+
+Transport
+Realtime, presence, and push
+GraphQL is right for most of it — but not all of it
+Queries and mutations over GraphQL, subscriptions over graphql-ws on a single multiplexed WebSocket. Use Spring for GraphQL, and put a DataLoader on every list field from day one. The N+1 problem in a chat schema (message → author → roles → presence) is brutal and it will not be visible in development with ten test users.
+
+Three things must bypass GraphQL
+File uploads — issue a presigned MinIO URL via a mutation, then have the client PUT directly to storage. Never stream bytes through your GraphQL server.
+Media downloads — presigned GET, ideally behind a caching reverse proxy.
+Voice/video, if you add it — WebRTC through a self-hosted SFU (LiveKit or mediasoup). GraphQL carries signalling only.
+Gateway design
+Each server node holds a set of WebSocket connections and registers them in Valkey. Events publish to Valkey pub/sub channels keyed by guild or channel; every node forwards to its own locally connected subscribers. This is what lets you run more than one backend instance, and retrofitting it later is painful — build it in from the first commit even while you're running a single node.
+
+Copy Discord's resume protocol: the client tracks a monotonic sequence number and on reconnect sends (session_id, last_seq). The gateway keeps a short ring buffer of recent events per session and replays the gap. Without it, every subway tunnel forces a full state resync — that's the difference between an app that feels solid and one that feels cheap.
+
+Presence vs. status — these are two different features
+Feature 4 — presence
+Online / Away / DND / Offline / Invisible
+Volatile, derived from connection state plus an explicit override. Lives entirely in Valkey with a TTL refreshed by heartbeat. Add a custom status: emoji + text + optional expiry. DND must be enforced at the push layer, not just shown as a coloured dot — that's the entire point of it.
+
+Feature 17 — rich presence
+"Playing / Listening to…"
+A local IPC socket (named pipe on Windows, Unix socket elsewhere) that third-party apps connect to, sending {details, state, timestamps, assets, party, buttons}. Also volatile — Valkey only, never persisted. Reuses the story music track object.
+
+Push notifications
+Platform	Service	Notes
+Android	FCM HTTP v1	The legacy FCM API is dead — use v1 with a service account. Self-hosted alternative exists (UnifiedPush) but requires users to install a distributor app.
+iOS	APNs	Token-based auth (p8), not certificates. No alternative exists — Apple owns the only socket to a sleeping iPhone.
+Web	Web Push / VAPID	Standardised, works in all current browsers including Safari for installed PWAs.
+Desktop	In-process	The app is running, so notify via the OS API directly. Fully offline. Windows also supports WNS if you want notifications while closed.
+The mute filter belongs in the notification service
+Feature 11 (muting a chat / server / person) and feature 4 (DND) are only real if the fanout worker checks them before dispatch. Build one shouldNotify(user, event) function that consults blocks, mutes, DND, per-channel notification level (all / mentions / none) and quiet hours — and call it from exactly one place. Every chat app that gets this wrong got it wrong by checking in two places.
+
+Your list, resolved
+The 20 requirements, with the tricky ones flagged
+#	Requirement	Approach	Difficulty
+1–2	Private & group DM	Channels with no guild. A DM is a 2-member channel; a group DM adds an owner and an invite list.	Low
+3	Servers	Guilds → categories → channels. Invites with expiry, max-uses, optional vanity slug.	Medium
+4	Presence states	Valkey with heartbeat TTL. DND enforced at the push layer.	Low
+5	Stories	JSONB overlays + MinIO lifecycle expiry. See above.	Medium
+6	Emoji / files / audio / location	Presigned uploads. Voice notes as Opus with precomputed waveform peaks. Location via PostGIS. Strip EXIF GPS from every upload by default — it leaks home addresses.	Medium
+7	Push, all platforms	FCM + APNs + Web Push behind one transport interface.	Medium
+8	Forensic + action logging	Per-session, not per-message. Drop MAC. Retention policy required.	Scope risk
+9	"Hashing"	Split into hash vs encrypt. See the table above.	Medium
+10	Server roles	128-bit bitfield, positional hierarchy, channel overwrites.	Highest complexity
+11	Blocking & muting	Two separate tables — blocks are visibility rules, mutes are notification rules. Don't merge them.	Low
+12	Tagging / mentions	Inline entity syntax <@id> <#id> <@&role> stored in the body, plus a message_mentions side table for notification fanout and the mentions inbox.	Low
+13	Profile customisation + handle	Avatar, banner, border, bio, accent colour. Discriminator allocator above.	Medium
+14	Per-server nickname	One nullable column on guild_members, falling back to display name.	Trivial
+15	Blocked-but-shared collapse	Return the message with authorBlocked: true and let the client collapse it to "Blocked message — show". Don't strip content server-side; that forces a round trip to reveal. In DMs, a block prevents delivery entirely.	Low
+16	Custom theme colours	Take primary + secondary, generate a full tonal ramp (Material 3's HCT is the reference implementation, and it's a vendorable library). Enforce a WCAG AA contrast floor or users will build unreadable themes and then file bugs about it.	Medium
+17	Rich presence	Local IPC socket + volatile Valkey state.	Medium
+18	Server folders	Per-user view preference: a JSONB list of {id, name, color, guild_ids[]} plus a global ordering. Not shared state.	Trivial
+19	Server icons	Same asset pipeline as avatars.	Trivial
+20	Music on stories	Local audio, or metadata + deep link. Licensing blocks clip playback.	Legal constraint
+What you didn't list but will need
+Grouped by where the user expectation comes from. Starred items are the ones people notice immediately by their absence.
+
+From Discord
+Server & community mechanics
+★ Threads on messages · forum and announcement channels · ★ reactions (custom emoji, per-server sticker packs) · edit / delete / pin · reply-with-jump · slowmode · NSFW gating · server discovery · welcome screen and onboarding · ★ AutoMod (keyword, spam, mention-flood) · timeouts, kick, ban with a message-purge window · ★ read state and unread markers · search with from: in: has: filters · webhooks and a bot API · voice channels, screen share, soundboard.
+
+From WhatsApp
+Messaging & privacy mechanics
+★ Delivery receipts (sent / delivered / read) with a privacy toggle · ★ typing indicators · disappearing messages per chat · view-once media · ★ forwarding with a "forwarded many times" label · star / bookmark · archive and pin chats · polls · broadcast channels · communities (groups of groups) · group invite links and admin-only posting · ★ multi-device linking · two-step verification PIN · live location with a time limit · media auto-download settings · chat export.
+
+Neither app advertises these
+Platform obligations
+★ Rate limiting on every mutation · signup CAPTCHA and email/phone verification · ★ account deletion and data export (legally required the moment you have EU users) · a moderation queue and report flow · OpenTelemetry traces and metrics · feature flags · Flyway migrations from commit one · ★ idempotency keys on message send, so a retry after a flaky connection doesn't duplicate the message.
+
+Easy to defer, expensive to retrofit
+Build the hooks now
+i18n and RTL layout · accessibility (screen reader labels, focus order, reduced motion) · keyboard shortcuts · a GraphQL schema versioning strategy · soft-delete columns on user-generated content · edited_at and a revision trail on messages · a flags bitfield on users, messages and guilds. Each is a one-line addition today and a migration across billions of rows later.
+
+Sequenced by dependency
+Build order
+Each phase depends on the one before it. The ordering is deliberate: the permission engine lands before servers become real, and encryption lands before you have production data to migrate.
+
+P 1
+Skeleton
+Postgres schema with snowflake IDs and partitioned messages. Spring Boot + Spring for GraphQL. Auth with Argon2id, sessions, refresh tokens. Compose Multiplatform shell running on desktop and Android. One DM channel that sends and receives text over a subscription.
+
+SHIPS: 1 · 12 · 14 · idempotency keys · migrations
+
+P 2
+Social graph
+Friends and requests. Blocks and mutes as separate tables. Group DMs. Presence and custom status on Valkey, with the gateway registry and resume protocol. Read state and unread counts. Typing indicators.
+
+SHIPS: 2 · 4 · 11 · 15 · receipts · typing
+
+P 3
+Servers
+Guilds, categories, channels, invites. The full permission engine with its cache and invalidation rules. Per-server nicknames, roles UI, folders. Moderation: kick, ban, timeout, audit log.
+
+SHIPS: 3 · 10 · 14 · 18 · 19 · threads · reactions
+
+P 4
+Rich media
+MinIO presigned upload pipeline with EXIF stripping and thumbnailing. Voice notes with waveforms. Custom emoji and stickers. Location sharing. Stories with JSONB overlays and the music sticker. Rich presence IPC.
+
+SHIPS: 5 · 6 · 13 · 17 · 20
+
+P 5
+Reach and hardening
+FCM / APNs / Web Push behind the unified mute filter. Theme engine with contrast enforcement. At-rest encryption and envelope key management via Vault. Session and audit logging with retention jobs. iOS build. Rate limiting everywhere.
+
+SHIPS: 7 · 8 · 9 · 16 · GDPR export/delete
+
+P 6
+Optional depth
+MLS end-to-end encryption for DMs, opt-in. WebRTC voice and video via a self-hosted SFU. Meilisearch. Bot API and webhooks. AutoMod. A web client, if the Wasm target has matured or you decide to build one separately.
+
+SHIPS: E2EE · voice · search · bots
+
+SINGULAR (WORKING NAME) — ARCHITECTURE BLUEPRINT, REV A · 2 SEPTEMBER 2026
+NO REMOTE DEPENDENCIES: THIS PAGE LOADS NO FONTS, SCRIPTS, STYLES OR IMAGES FROM ANY EXTERNAL HOST.
+Researched against: Discord developer docs (permissions, snowflakes) · Discord username migration notes · JetBrains Compose Multiplatform 1.8.0 release · IETF RFC 9420 (MLS) and OpenMLS · Discord's Cassandra → ScyllaDB migration write-ups · Spotify Web API deprecation notices.

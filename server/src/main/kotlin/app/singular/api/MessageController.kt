@@ -3,6 +3,7 @@ package app.singular.api
 import app.singular.domain.Message
 import app.singular.domain.User
 import app.singular.message.MessagePage
+import app.singular.ratelimit.RateLimiter
 import app.singular.message.Mention
 import app.singular.message.MentionRepository
 import app.singular.message.MessageService
@@ -38,6 +39,7 @@ class MessageController(
     private val social: SocialRepository,
     private val mentions: MentionRepository,
     private val users: UserRepository,
+    private val rateLimiter: RateLimiter,
 ) {
 
     /** Feature 12: everything aimed at you, newest first. */
@@ -56,9 +58,16 @@ class MessageController(
         ctx: GraphQLContext,
     ): MessagePage = messageService.page(channelId, ctx.requirePrincipal().userId, before, limit)
 
+    /**
+     * Flood control, keyed per user. Generous on purpose — this stops one account pasting a
+     * script's output into a channel, not a fast typist; the failure mode of limiting a chatty
+     * human is a support ticket, not an incident. Nonce-based idempotency (in MessageService)
+     * already absorbs client retries, so legitimate retries don't consume this bucket.
+     */
     @MutationMapping
     fun sendMessage(@Argument input: SendMessageInput, ctx: GraphQLContext): Message {
         val principal = ctx.requirePrincipal()
+        rateLimiter.acquireOrThrow("send-message", principal.userId.toString())
         return messageService.send(
             channelId = input.channelId,
             authorId = principal.userId,

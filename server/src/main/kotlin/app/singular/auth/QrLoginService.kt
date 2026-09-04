@@ -10,6 +10,7 @@ import app.singular.domain.ClientContext
 import app.singular.domain.LoginRequest
 import app.singular.domain.LoginRequestStatus
 import app.singular.domain.User
+import app.singular.event.FanoutBus
 import app.singular.security.ClientInfo
 import app.singular.security.Crypto
 import app.singular.user.UserRepository
@@ -76,8 +77,15 @@ class QrLoginService(
     private val crypto: Crypto,
     private val snowflake: Snowflake,
     private val audit: AuditLog,
+    private val bus: FanoutBus,
 ) {
 
+    /**
+     * Per-request replay sinks. Approval may happen on a DIFFERENT node than the one holding
+     * the requesting device's websocket, so the event itself travels via [bus] (Valkey), and
+     * this map only holds the node-local replay buffer each device reads from. The poll-secret
+     * check stays local and unchanged — it gates the subscription, not the fanout.
+     */
     private val sinks = ConcurrentHashMap<Long, Sinks.Many<LoginRequestEvent>>()
 
     @Transactional
@@ -211,12 +219,29 @@ class QrLoginService(
         return sinkFor(id).asFlux()
     }
 
+    /**
+     * Publishes to every node via Valkey. Each node feeds its own local replay sink from the
+     * subscription, so the device's gets the event regardless of which node handled the
+     * approving phone.
+     */
     private fun publish(id: Long, event: LoginRequestEvent) {
-        sinkFor(id).tryEmitNext(event)
+        bus.publish("qr", id.toString(), event)
     }
 
+    /** The Valkey → local-sink wiring for each tracked request, so it can be torn down again. */
+    private val busWires = ConcurrentHashMap<Long, reactor.core.Disposable>()
+
     private fun sinkFor(id: Long): Sinks.Many<LoginRequestEvent> =
-        sinks.computeIfAbsent(id) { Sinks.many().replay().latest() }
+        sinks.computeIfAbsent(id) {
+            // Wire the local replay sink to this node's Valkey subscription for the request.
+            // FanoutBus ref-counts the underlying channel subscription; this wire is undone
+            // in releaseSink so a finished request costs nothing on any node.
+            busWires.computeIfAbsent(id) {
+                bus.subscribe<LoginRequestEvent>("qr", id.toString())
+                    .subscribe { incoming -> sinks[id]?.tryEmitNext(incoming) }
+            }
+            Sinks.many().replay().latest()
+        }
 
     /** Constant-time comparison: a byte-by-byte early exit leaks the secret one byte at a time. */
     private fun requirePollSecret(id: Long, pollSecret: String) {
@@ -228,6 +253,9 @@ class QrLoginService(
 
     /** Drops sinks for requests that can no longer change. Called by the reaper. */
     fun releaseSink(id: Long) {
+        // Dispose the wire first so a late Valkey event finds no sink to fill; the opposite
+        // ordering can resurrect an entry in `sinks` via tryEmitNext.
+        busWires.remove(id)?.dispose()
         sinks.remove(id)?.tryEmitComplete()
     }
 

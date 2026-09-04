@@ -1,17 +1,30 @@
 package app.singular.social
 
 import app.singular.domain.PresenceStatus
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
 import java.sql.Timestamp
 import java.time.Instant
 
-/** What the client owns and the server only stores. */
+/**
+ * What the client owns and the server only stores.
+ *
+ * [themePreset] lives in the `extras` jsonb column rather than in a column of its own. That
+ * column already existed with exactly this purpose — its comment reads "adding a setting should
+ * not cost a migration" — and it was read by no Kotlin code at all. Using it means a new
+ * appearance preference costs a one-line change here instead of a Flyway migration.
+ *
+ * [themePrimary]/[themeSecondary] are legacy: the old client let users pick two raw hues. They
+ * are kept so an existing user's saved colours survive, and so the client can tell "never
+ * customised" from "customised before presets existed".
+ */
 data class UserSettings(
     val chatLayout: Int,
     val themePrimary: Int?,
     val themeSecondary: Int?,
     val themeDark: Boolean?,
+    val themePreset: String? = null,
 )
 
 /** The user's chosen status, as opposed to what others currently see. */
@@ -23,7 +36,7 @@ data class DesiredStatus(
 )
 
 @Repository
-class SocialRepository(private val jdbc: JdbcClient) {
+class SocialRepository(private val jdbc: JdbcClient, private val json: ObjectMapper) {
 
     // -- Blocking ------------------------------------------------------------
 
@@ -136,7 +149,8 @@ class SocialRepository(private val jdbc: JdbcClient) {
     fun settings(userId: Long): UserSettings = jdbc
         .sql(
             """
-            SELECT chat_layout, theme_primary, theme_secondary, theme_dark
+            SELECT chat_layout, theme_primary, theme_secondary, theme_dark,
+                   extras::text AS extras
             FROM user_settings WHERE user_id = :u
             """
         )
@@ -147,6 +161,7 @@ class SocialRepository(private val jdbc: JdbcClient) {
                 themePrimary = rs.getObject("theme_primary") as Int?,
                 themeSecondary = rs.getObject("theme_secondary") as Int?,
                 themeDark = rs.getObject("theme_dark") as Boolean?,
+                themePreset = readExtra(rs.getString("extras"), "themePreset"),
             )
         }
         .optional()
@@ -154,25 +169,56 @@ class SocialRepository(private val jdbc: JdbcClient) {
         // null here would push that branch into every caller.
         .orElse(UserSettings(chatLayout = 0, themePrimary = null, themeSecondary = null, themeDark = null))
 
+    /**
+     * Reads one string out of the `extras` jsonb.
+     *
+     * Tolerates a missing column value, malformed JSON and a null node, all as "absent". The
+     * server never writes this shape itself — it is the client's bag — so anything could be in
+     * there, and a settings read is not the place to fail over it.
+     */
+    private fun readExtra(raw: String?, key: String): String? {
+        val text = raw?.takeIf { it.isNotBlank() } ?: return null
+        val node = runCatching { json.readTree(text) }.getOrNull() ?: return null
+        val value = node.get(key) ?: return null
+        return value.takeIf { !it.isNull }?.asText()
+    }
+
     fun saveSettings(userId: Long, s: UserSettings) {
+        // Built in Kotlin rather than with jsonb_build_object(:preset) so the SQL never has to
+        // infer the type of a nullable text parameter — which Postgres resolves as "unknown"
+        // inside a function call and rejects.
+        val presetNode = s.themePreset?.let { json.writeValueAsString(mapOf("themePreset" to it)) }
+        val clearPreset = s.themePreset == null
+
         jdbc.sql(
             """
-            INSERT INTO user_settings (user_id, chat_layout, theme_primary, theme_secondary, theme_dark)
-            VALUES (:u, :layout, :p, :s, :dark)
+            INSERT INTO user_settings (user_id, chat_layout, theme_primary, theme_secondary, theme_dark, extras)
+            VALUES (:u, :layout, :p, :s, :dark, CAST(COALESCE(:preset, '{}') AS jsonb))
             ON CONFLICT (user_id) DO UPDATE SET
                 chat_layout     = EXCLUDED.chat_layout,
                 theme_primary   = EXCLUDED.theme_primary,
                 theme_secondary = EXCLUDED.theme_secondary,
                 theme_dark      = EXCLUDED.theme_dark,
+                -- Merge, never overwrite. `extras` is the client's bag and future features will
+                -- put their own keys in it (server folders, notification levels). A plain
+                -- assignment here would silently delete them the first time someone changed
+                -- their theme. `||` is a shallow merge, which is the whole point.
+                extras          = CASE
+                    WHEN :clear THEN COALESCE(user_settings.extras, '{}'::jsonb) - 'themePreset'
+                    ELSE COALESCE(user_settings.extras, '{}'::jsonb)
+                         || CAST(COALESCE(:preset, '{}') AS jsonb)
+                END,
                 updated_at      = now()
             """
         )
-            .param("u", userId)
-            .param("layout", s.chatLayout)
-            .param("p", s.themePrimary)
-            .param("s", s.themeSecondary)
-            .param("dark", s.themeDark)
-            .update()
+        .param("u", userId)
+        .param("layout", s.chatLayout)
+        .param("p", s.themePrimary)
+        .param("s", s.themeSecondary)
+        .param("dark", s.themeDark)
+        .param("preset", presetNode)
+        .param("clear", clearPreset)
+        .update()
     }
 
     // -- Desired status ------------------------------------------------------

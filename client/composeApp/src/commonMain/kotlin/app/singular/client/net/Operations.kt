@@ -134,13 +134,13 @@ object Operations {
     """
 
     val SETTINGS = """
-        query Settings { settings { chatLayout themePrimary themeSecondary themeDark } }
+        query Settings { settings { chatLayout themePreset themePrimary themeSecondary themeDark } }
     """
 
     val UPDATE_SETTINGS = """
         mutation UpdateSettings(${'$'}input: SettingsInput!) {
             updateSettings(input: ${'$'}input) {
-                chatLayout themePrimary themeSecondary themeDark
+                chatLayout themePreset themePrimary themeSecondary themeDark
             }
         }
     """

@@ -9,7 +9,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.floor
@@ -73,6 +72,3 @@ fun QrCode(
         }
     }
 }
-
-/** Fallback tint when a code can't be produced, so the panel still lays out sensibly. */
-internal val QrUnavailable = Color(0x1A808080)

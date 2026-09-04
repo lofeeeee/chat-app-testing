@@ -1,4 +1,4 @@
-package app.singular.client.ui
+﻿package app.singular.client.ui
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -65,7 +64,7 @@ fun QrLoginPanel(
         )
 
         Surface(
-            shape = RoundedCornerShape(12.dp),
+            shape = MaterialTheme.shapes.medium,
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 2.dp,
         ) {
@@ -139,7 +138,7 @@ fun QrLoginPanel(
                 CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(10.dp))
                 Text(
-                    "Scanned — confirm on your other device",
+                    "Scanned â€” confirm on your other device",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

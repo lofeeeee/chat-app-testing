@@ -3,6 +3,7 @@ package app.singular.api
 import app.singular.auth.AuthResult
 import app.singular.auth.AuthService
 import app.singular.domain.ClientContext
+import app.singular.ratelimit.RateLimiter
 import app.singular.security.CLIENT_INFO_KEY
 import app.singular.security.ClientInfo
 import graphql.GraphQLContext
@@ -26,29 +27,49 @@ data class LoginInput(
 )
 
 @Controller
-class AuthController(private val auth: AuthService) {
+class AuthController(
+    private val auth: AuthService,
+    private val rateLimiter: RateLimiter,
+) {
 
+    /**
+     * Registration is unauthenticated, so the client IP is the only identity available to key
+     * the limit on. The policy is the tightest in the app: registration from one IP at more
+     * than a trickle is account farming, not sign-ups.
+     */
     @MutationMapping
-    fun register(@Argument input: RegisterInput, ctx: GraphQLContext): AuthResult =
-        auth.register(
+    fun register(@Argument input: RegisterInput, ctx: GraphQLContext): AuthResult {
+        rateLimiter.acquireOrThrow("register", clientKey(ctx))
+        return auth.register(
             username = input.username,
             email = input.email,
             password = input.password,
             displayName = input.displayName,
             client = clientContext(ctx, input.deviceId),
         )
+    }
 
+    /**
+     * Limits credential stuffing: without this, an attacker can try thousands of
+     * email/password pairs per minute. Keyed by IP, not account, because the stuffing attack
+     * rotates the account name and keeps the IP — limiting per-account would miss it entirely.
+     */
     @MutationMapping
-    fun login(@Argument input: LoginInput, ctx: GraphQLContext): AuthResult =
-        auth.login(
+    fun login(@Argument input: LoginInput, ctx: GraphQLContext): AuthResult {
+        rateLimiter.acquireOrThrow("login", clientKey(ctx))
+        return auth.login(
             email = input.email,
             password = input.password,
             client = clientContext(ctx, input.deviceId),
         )
+    }
 
+    /** Refresh presents a long-lived secret; throttling it blunts brute-force of a leaked token. */
     @MutationMapping
-    fun refresh(@Argument refreshToken: String, ctx: GraphQLContext): AuthResult =
-        auth.refresh(refreshToken, clientContext(ctx, deviceId = null))
+    fun refresh(@Argument refreshToken: String, ctx: GraphQLContext): AuthResult {
+        rateLimiter.acquireOrThrow("token-refresh", clientKey(ctx))
+        return auth.refresh(refreshToken, clientContext(ctx, deviceId = null))
+    }
 
     @MutationMapping
     fun logout(@Argument refreshToken: String): Boolean = auth.logout(refreshToken)
@@ -67,4 +88,12 @@ class AuthController(private val auth: AuthService) {
                 ?: UUID.randomUUID(),
         )
     }
+
+    /**
+     * The bucket key for anonymous endpoints. Falls back to "unknown" when no IP survived
+     * resolution — all such callers then share one bucket, which is over-throttling rather
+     * than under-throttling, and the direction of that failure is deliberate.
+     */
+    private fun clientKey(ctx: GraphQLContext): String =
+        ctx.get<ClientInfo>(CLIENT_INFO_KEY)?.ip?.takeIf { it.isNotBlank() } ?: "unknown"
 }

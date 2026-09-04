@@ -7,6 +7,7 @@ import app.singular.auth.QrLoginService
 import app.singular.auth.ScannedLoginRequest
 import app.singular.domain.LoginRequest
 import app.singular.domain.User
+import app.singular.ratelimit.RateLimiter
 import app.singular.security.CLIENT_INFO_KEY
 import app.singular.security.ClientInfo
 import app.singular.security.requirePrincipal
@@ -23,27 +24,41 @@ import java.util.UUID
 data class LoginRequestView(val request: LoginRequest, val qrToken: String)
 
 @Controller
-class QrLoginController(private val qr: QrLoginService) {
+class QrLoginController(
+    private val qr: QrLoginService,
+    private val rateLimiter: RateLimiter,
+) {
 
     // -- Requesting device (unauthenticated) --------------------------------
 
+    /**
+     * Anonymous, and before this limit existed it minted login requests without bound — the
+     * largest open hole on the server. Keyed by IP: a device legitimately creates one request
+     * and rotates its token every twenty seconds; anything faster is a script.
+     */
     @MutationMapping
     fun createLoginRequest(
         @Argument deviceId: String?,
         @Argument platform: String?,
         ctx: GraphQLContext,
-    ): NewLoginRequest = qr.create(
-        client = ctx.get<ClientInfo>(CLIENT_INFO_KEY) ?: ClientInfo(null, null),
-        deviceId = deviceId?.let { runCatching { UUID.fromString(it) }.getOrNull() }
-            ?: UUID.randomUUID(),
-        platform = platform?.take(120),
-    )
+    ): NewLoginRequest {
+        rateLimiter.acquireOrThrow("qr-create", clientKey(ctx))
+        return qr.create(
+            client = ctx.get<ClientInfo>(CLIENT_INFO_KEY) ?: ClientInfo(null, null),
+            deviceId = deviceId?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+                ?: UUID.randomUUID(),
+            platform = platform?.take(120),
+        )
+    }
 
+    /** Token rotation runs on the same anonymous edge, so it gets its own (looser) bucket. */
     @MutationMapping
     fun rotateLoginToken(
         @Argument id: Long,
         @Argument pollSecret: String,
+        ctx: GraphQLContext,
     ): LoginRequestView {
+        rateLimiter.acquireOrThrow("qr-rotate", clientKey(ctx))
         val (request, token) = qr.rotate(id, pollSecret)
         return LoginRequestView(request, token)
     }
@@ -64,11 +79,20 @@ class QrLoginController(private val qr: QrLoginService) {
 
     // -- Approving phone (authenticated) ------------------------------------
 
+    /**
+     * Keyed by user, not IP: this is the QR brute-force surface (guessing token values), and a
+     * guesser with many IPs still has one account-sized bucket. The token itself is 256 bits,
+     * so the limit is belt-and-braces rather than the primary defence.
+     */
     @MutationMapping
     fun claimLoginRequest(
         @Argument qrToken: String,
         ctx: GraphQLContext,
-    ): ScannedLoginRequest = qr.claim(qrToken, ctx.requirePrincipal().userId)
+    ): ScannedLoginRequest {
+        val principal = ctx.requirePrincipal()
+        rateLimiter.acquireOrThrow("qr-claim", principal.userId.toString())
+        return qr.claim(qrToken, principal.userId)
+    }
 
     @MutationMapping
     fun approveLoginRequest(@Argument id: Long, ctx: GraphQLContext): Boolean =
@@ -77,6 +101,13 @@ class QrLoginController(private val qr: QrLoginService) {
     @MutationMapping
     fun denyLoginRequest(@Argument id: Long, ctx: GraphQLContext): Boolean =
         qr.deny(id, ctx.requirePrincipal().userId)
+
+    /**
+     * The bucket key for anonymous endpoints. Same fallback semantics as AuthController: an
+     * unresolvable IP collapses to one shared bucket rather than escaping the limit.
+     */
+    private fun clientKey(ctx: GraphQLContext): String =
+        ctx.get<ClientInfo>(CLIENT_INFO_KEY)?.ip?.takeIf { it.isNotBlank() } ?: "unknown"
 
     // -- Field resolvers ----------------------------------------------------
 

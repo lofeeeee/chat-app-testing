@@ -1,4 +1,4 @@
-package app.singular.client.ui
+﻿package app.singular.client.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -131,10 +130,13 @@ private fun AddStoryButton(enabled: Boolean, onClick: () -> Unit) {
 @Composable
 private fun StoryBubble(story: StoryDto, onClick: () -> Unit) {
     // Unseen gets a solid accent ring; watched fades to a thin outline. The ring is the whole
-    // affordance — without it the tray is just a row of avatars with no state.
+    // affordance â€” without it the tray is just a row of avatars with no state.
+    //
+    // accentSoft rather than primary: the ring is a 2.5dp stroke against the canvas, i.e. it is
+    // doing a text legibility job, and `primary` is a fill colour doing a text job.
     val ringColor =
         if (story.seen) MaterialTheme.colorScheme.outline
-        else MaterialTheme.colorScheme.primary
+        else LocalSingularColors.current.accentSoft
     val ringWidth = if (story.seen) 1.dp else 2.5.dp
 
     Column(
@@ -163,7 +165,7 @@ private fun StoryBubble(story: StoryDto, onClick: () -> Unit) {
  * A single story, full-bleed.
  *
  * Overlays arrive as JSON and are composited by [StoryOverlayCanvas] on top of the media,
- * never baked into the uploaded image — so text, stickers, mentions and the music widget stay
+ * never baked into the uploaded image â€” so text, stickers, mentions and the music widget stay
  * editable and restylable, and a mention re-renders with someone's *current* name rather than
  * the one frozen in at posting time.
  */
@@ -195,7 +197,7 @@ private fun StoryViewer(story: StoryDto, isMine: Boolean, onClose: () -> Unit) {
                     Modifier
                         .fillMaxWidth()
                         .height(340.dp)
-                        .clip(RoundedCornerShape(12.dp))
+                        .clip(MaterialTheme.shapes.medium)
                         .background(MaterialTheme.colorScheme.surfaceVariant),
                 ) {
                     // The media, then the overlays on top. Overlays are composited here rather
@@ -206,7 +208,7 @@ private fun StoryViewer(story: StoryDto, isMine: Boolean, onClose: () -> Unit) {
                     if (attachment != null && media != null) {
                         RemoteImage(
                             url = media,
-                            // The attachment id, never the URL — presigned URLs change
+                            // The attachment id, never the URL â€” presigned URLs change
                             // signature on every fetch and would miss the cache each time.
                             stableKey = attachment.id,
                             contentDescription = "Story",

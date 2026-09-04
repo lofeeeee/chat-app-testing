@@ -1,4 +1,4 @@
-package app.singular.client.ui
+﻿package app.singular.client.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Image
@@ -39,7 +38,7 @@ import kotlin.math.roundToInt
 /**
  * Renders whatever a message carries besides text.
  *
- * Shape is chosen by `kind`, which the **server** assigned after actually decoding the bytes —
+ * Shape is chosen by `kind`, which the **server** assigned after actually decoding the bytes â€”
  * not by the filename or the declared MIME type. A file that claims to be an image but isn't
  * gets reclassified server-side, so this never hands a malformed payload to an image decoder.
  */
@@ -69,7 +68,7 @@ fun AttachmentBlock(
  *
  * The frame is laid out **before** any pixels arrive, using the width and height the server
  * measured at finalize time. That is what stops the message list jumping around as images
- * load — the single most irritating thing a chat client can do while you're reading it.
+ * load â€” the single most irritating thing a chat client can do while you're reading it.
  *
  * The thumbnail is preferred over the original: it is exactly what the server generated for
  * this purpose, and a 4 MB photo has no business crossing the wire to fill a 300dp box.
@@ -86,9 +85,9 @@ private fun ImageAttachment(attachment: AttachmentDto, tint: Color) {
         Modifier
             .width(boxWidth)
             .height(boxWidth * ratio.coerceIn(0.3f, 1.6f))
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.small)
             .background(tint.copy(alpha = 0.10f))
-            .border(1.dp, tint.copy(alpha = 0.18f), RoundedCornerShape(10.dp)),
+            .border(1.dp, tint.copy(alpha = 0.18f), MaterialTheme.shapes.small),
         contentAlignment = Alignment.Center,
     ) {
         if (source != null) {
@@ -126,7 +125,7 @@ private fun FileAttachment(attachment: AttachmentDto, tint: Color) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.small)
             .background(tint.copy(alpha = 0.10f))
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -153,8 +152,8 @@ private fun FileAttachment(attachment: AttachmentDto, tint: Color) {
 /**
  * A voice note drawn from precomputed peaks.
  *
- * The waveform comes down with the message as 0–100 integers, so the bar renders instantly
- * without downloading and decoding the audio — which is the difference between a list that
+ * The waveform comes down with the message as 0â€“100 integers, so the bar renders instantly
+ * without downloading and decoding the audio â€” which is the difference between a list that
  * scrolls and one that stalls on every voice message.
  */
 @Composable
@@ -162,7 +161,7 @@ private fun VoiceNote(attachment: AttachmentDto, tint: Color) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(MaterialTheme.shapes.extraLarge)
             .background(tint.copy(alpha = 0.10f))
             .padding(horizontal = 12.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -206,7 +205,7 @@ private fun LocationCard(location: LocationDto, tint: Color) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.small)
             .background(tint.copy(alpha = 0.10f))
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -220,7 +219,7 @@ private fun LocationCard(location: LocationDto, tint: Color) {
                 fontWeight = FontWeight.Medium,
                 color = tint,
             )
-            // Five decimal places is roughly a metre — enough to be useful, and it stops the
+            // Five decimal places is roughly a metre â€” enough to be useful, and it stops the
             // card showing sixteen digits of float noise.
             Text(
                 "${trim5(location.latitude)}, ${trim5(location.longitude)}",

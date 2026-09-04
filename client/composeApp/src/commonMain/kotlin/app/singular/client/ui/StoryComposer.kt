@@ -1,4 +1,4 @@
-package app.singular.client.ui
+﻿package app.singular.client.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -37,7 +36,7 @@ import androidx.compose.ui.unit.dp
  * Composes a story before the image is chosen.
  *
  * Text is collected first and the picker opens on confirm, because the platform file dialog is
- * modal — opening it first and then trying to show a Compose dialog on top of the returned
+ * modal â€” opening it first and then trying to show a Compose dialog on top of the returned
  * image fights the OS on desktop and the Activity lifecycle on Android.
  *
  * What this produces is **overlay JSON**, not a flattened picture. The caption travels with the
@@ -53,8 +52,9 @@ fun StoryComposer(
     var plate by remember { mutableStateOf(true) }
     var colorIndex by remember { mutableStateOf(0) }
 
-    val palette = listOf("#FFFFFF", "#F23F43", "#F0B232", "#23A55A", "#3D5AFE", "#B57EDC")
-    val selected = palette[colorIndex]
+    // StoryInk, not the theme's palette: these sit over an arbitrary photo, so a relationship
+    // to the surrounding UI would be coincidental and sometimes unreadable.
+    val selected = StoryInk[colorIndex]
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -67,7 +67,7 @@ fun StoryComposer(
                     Modifier
                         .fillMaxWidth()
                         .height(120.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .clip(MaterialTheme.shapes.small)
                         .background(MaterialTheme.colorScheme.surfaceVariant),
                 ) {
                     if (caption.isNotBlank()) {
@@ -110,7 +110,7 @@ fun StoryComposer(
 
                 Text("Colour", style = MaterialTheme.typography.labelMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    palette.forEachIndexed { index, hex ->
+                    StoryInk.forEachIndexed { index, hex ->
                         val swatch = Color(0xFF000000L.toInt() or hex.removePrefix("#").toLong(16).toInt())
                         Box(
                             Modifier
