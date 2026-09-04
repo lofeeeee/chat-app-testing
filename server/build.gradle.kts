@@ -43,6 +43,12 @@ dependencies {
     implementation("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")
 
+    // Pub/sub fanout + shared volatile state (presence, typing, rate-limit counters when
+    // multi-node) against the self-hosted Valkey container. Lettuce rather than Jedis because
+    // one pub/sub connection can subscribe to many channels dynamically, and its message
+    // stream integrates with Reactor, which is what the GraphQL subscriptions already speak.
+    implementation("io.lettuce:lettuce-core:6.5.5.RELEASE")
+
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.graphql:spring-graphql-test")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")

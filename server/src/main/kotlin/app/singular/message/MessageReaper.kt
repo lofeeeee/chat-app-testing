@@ -24,6 +24,8 @@ class MessageReaper(
     private val attachments: app.singular.media.AttachmentRepository,
     private val storage: app.singular.media.StorageService,
     private val stories: app.singular.story.StoryRepository,
+    private val rateLimits: app.singular.ratelimit.TokenBucketRateLimiter,
+    private val locks: app.singular.schedule.DistributedLock,
     private val jdbc: JdbcClient,
 ) {
 
@@ -36,7 +38,7 @@ class MessageReaper(
      * a slow typist, not garbage.
      */
     @Scheduled(cron = "0 45 3 * * *")
-    fun reapOrphanedUploads() {
+    fun reapOrphanedUploads() = locks.tryLock("reap-orphans", LOCK_TTL)?.use {
         val orphans = attachments.findOrphaned(Instant.now().minus(ORPHAN_GRACE))
         orphans.forEach { attachment ->
             storage.delete(attachment.objectKey)
@@ -44,7 +46,7 @@ class MessageReaper(
             attachments.delete(attachment.id)
         }
         if (orphans.isNotEmpty()) LOG.info("Reaped {} orphaned uploads", orphans.size)
-    }
+    } ?: LOG.debug("reap-orphans: another node holds the lease")
 
     /**
      * Reclaims storage for stories past their day.
@@ -53,7 +55,7 @@ class MessageReaper(
      * never leave a story visible past its 24 hours. This only frees bytes.
      */
     @Scheduled(cron = "0 0 * * * *")
-    fun reapExpiredStories() {
+    fun reapExpiredStories() = locks.tryLock("reap-stories", LOCK_TTL)?.use {
         val expired = stories.expiredKeys()
         expired.forEach { id ->
             stories.find(id)?.attachmentId?.let { attachmentId ->
@@ -66,13 +68,29 @@ class MessageReaper(
             stories.hardDelete(id)
         }
         if (expired.isNotEmpty()) LOG.info("Reaped {} expired stories", expired.size)
-    }
+    } ?: LOG.debug("reap-stories: another node holds the lease")
 
     /** Idempotency keys only need to outlive a client's retry window. */
     @Scheduled(cron = "0 15 3 * * *")
-    fun reapNonces() {
+    fun reapNonces() = locks.tryLock("reap-nonces", LOCK_TTL)?.use {
         val deleted = messages.reapNonces(Instant.now().minus(NONCE_TTL))
         if (deleted > 0) LOG.info("Reaped {} expired message nonces", deleted)
+    } ?: LOG.debug("reap-nonces: another node holds the lease")
+
+    /**
+     * Evicts idle rate-limit buckets.
+     *
+     * Every unique `(scope, key)` pair the limiter has ever seen owns an entry, and keys are
+     * largely IP-shaped — so the only thing bounding the map's size is this sweep. A spoofed
+     * `X-Forwarded-For` spray needs to keep hitting the server *within the idle window* to keep
+     * its buckets alive; older junk goes quietly.
+     */
+    @Scheduled(cron = "0 5 4 * * *")
+    fun sweepRateLimitBuckets() {
+        // Node-local memory, so no lease needed: every node sweeps its own map, which is
+        // exactly right — the maps are per-node by construction.
+        val evicted = rateLimits.sweepIdle(RATE_BUCKET_IDLE.toNanos())
+        if (evicted > 0) LOG.debug("Swept {} idle rate-limit buckets", evicted)
     }
 
     /**
@@ -85,13 +103,13 @@ class MessageReaper(
      * abandoned sign-ins can't accumulate.
      */
     @Scheduled(fixedDelay = 60_000, initialDelay = 60_000)
-    fun reapLoginRequests() {
+    fun reapLoginRequests() = locks.tryLock("reap-login-requests", LOCK_TTL)?.use {
         val expired = loginRequests.expireStale()
         val deleted = loginRequests.deleteResolvedBefore(Instant.now().minus(LOGIN_RETENTION))
         if (expired > 0 || deleted > 0) {
             LOG.debug("Login requests: {} expired, {} purged", expired, deleted)
         }
-    }
+    } ?: LOG.debug("reap-login-requests: another node holds the lease")
 
     /**
      * Creates partitions ahead of time.
@@ -103,7 +121,7 @@ class MessageReaper(
      * inserts start failing the moment the clock crosses into an uncreated month.
      */
     @Scheduled(cron = "0 30 3 * * *")
-    fun ensurePartitions() {
+    fun ensurePartitions() = locks.tryLock("ensure-partitions", LOCK_TTL)?.use {
         val today = LocalDate.now().withDayOfMonth(1)
         (0..MONTHS_AHEAD).forEach { offset ->
             val month = today.plusMonths(offset.toLong())
@@ -116,7 +134,7 @@ class MessageReaper(
             }
         }
         LOG.debug("Partitions ensured through {}", today.plusMonths(MONTHS_AHEAD.toLong()))
-    }
+    } ?: LOG.debug("ensure-partitions: another node holds the lease")
 
     private companion object {
         val LOG = org.slf4j.LoggerFactory.getLogger(MessageReaper::class.java)!!
@@ -128,6 +146,16 @@ class MessageReaper(
 
         /** How long an unsent upload is kept before it counts as abandoned. */
         val ORPHAN_GRACE: Duration = Duration.ofHours(6)
+
+        /** Rate-limit buckets untouched for this long are pure garbage. */
+        val RATE_BUCKET_IDLE: Duration = Duration.ofHours(1)
+
+        /**
+         * Lease length for reaper jobs. Comfortably longer than the longest job, short enough
+         * that a node dying mid-job doesn't stall the next cron tick for long. If a job ever
+         * legitimately outgrows this, split the job — don't add lock renewal.
+         */
+        val LOCK_TTL: Duration = Duration.ofMinutes(30)
         const val MONTHS_AHEAD = 6
     }
 }

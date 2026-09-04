@@ -1,4 +1,4 @@
-package app.singular.client.ui
+﻿package app.singular.client.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -35,7 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.singular.client.AppState
@@ -44,7 +44,7 @@ import app.singular.client.AppState
  * Settings.
  *
  * Chat layout lives here rather than in the conversation header, where it started. It's a
- * preference you set once and forget, not an action you take on a particular chat — putting it
+ * preference you set once and forget, not an action you take on a particular chat â€” putting it
  * beside Mute and Block implied it was per-conversation, which it never was.
  */
 @Composable
@@ -68,7 +68,7 @@ fun SettingsScreen(state: AppState, onClose: () -> Unit) {
 }
 
 // ---------------------------------------------------------------------------
-// Appearance — layout + theme (feature 16)
+// Appearance â€” layout + theme (feature 16)
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -97,17 +97,17 @@ private fun AppearanceSection(state: AppState) {
 
             HorizontalDivider()
 
-            Text("Accent colours", style = MaterialTheme.typography.labelLarge)
+            Text("Theme", style = MaterialTheme.typography.labelLarge)
             Text(
-                "Everything else is derived from these. Colours too close to the background " +
-                    "are nudged until they stay readable.",
+                "Each theme is a finished palette, tuned for dark and light. " +
+                    "Your choice follows your account to every device.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text("Primary", style = MaterialTheme.typography.labelMedium)
-            SwatchRow(state.themePrimary) { state.setTheme(it, null, null) }
-            Text("Secondary", style = MaterialTheme.typography.labelMedium)
-            SwatchRow(state.themeSecondary) { state.setTheme(null, it, null) }
+            PresetGrid(
+                selected = state.themePreset ?: Presets.default.id,
+                onPick = { state.chooseThemePreset(it) },
+            )
 
             HorizontalDivider()
 
@@ -123,7 +123,7 @@ private fun AppearanceSection(state: AppState) {
                 }
                 Switch(
                     checked = state.themeDark ?: true,
-                    onCheckedChange = { state.setTheme(null, null, it) },
+                    onCheckedChange = { state.setThemeDark(it) },
                 )
             }
         }
@@ -141,13 +141,13 @@ private fun LayoutOption(
 ) {
     Column(
         modifier
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.small)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .border(
                 width = if (selected) 2.dp else 1.dp,
                 color = if (selected) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.outline,
-                shape = RoundedCornerShape(10.dp),
+                shape = MaterialTheme.shapes.small,
             )
             .clickable(onClick = onClick)
             .padding(12.dp),
@@ -186,8 +186,11 @@ private fun MiniBubble(mine: Boolean, width: Float) {
                 .height(13.dp)
                 .clip(RoundedCornerShape(7.dp))
                 .background(
+                    // raised, matching the real bubble in MessageList. This preview used
+                    // `surface`, which is a different colour â€” a preview that doesn't match the
+                    // thing it previews is worse than no preview.
                     if (mine) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.surface
+                    else MaterialTheme.colorScheme.surfaceVariant
                 )
         )
     }
@@ -198,7 +201,7 @@ private fun CompactPreview() {
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         repeat(3) { row ->
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Only the first row of a run carries an avatar — the same rule the real
+                // Only the first row of a run carries an avatar â€” the same rule the real
                 // layout uses, so the preview isn't lying about grouping.
                 if (row == 0) {
                     Box(
@@ -222,43 +225,101 @@ private fun CompactPreview() {
 }
 
 /**
- * A row of preset colours plus the current one.
+ * The theme picker.
  *
- * Presets rather than a free colour picker on purpose: the theme derives a whole palette from
- * these, and a hand-picked near-black primary produces a technically valid but unusable app.
- * [ensureContrast] catches the worst of it, but not offering the trap is better than fixing it.
+ * A preset is shown as a strip of its own real colours â€” canvas, surface, raised, then the
+ * accent â€” because that's what you're actually choosing. A swatch of the accent alone, which is
+ * what the old picker showed, tells you nothing about the four surfaces that dominate the
+ * screen; it's a paint chip for a room you can't see.
+ *
+ * Each strip renders in the mode currently applied, so the toggle above it previews what the
+ * theme looks like right now rather than a fixed snapshot.
  */
 @Composable
-private fun SwatchRow(current: Int?, onPick: (Int) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        SWATCHES.forEach { rgb ->
-            val selected = current == rgb
-            Box(
-                Modifier
-                    .size(32.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFF000000L.toInt() or rgb))
-                    .border(
-                        width = if (selected) 3.dp else 1.dp,
-                        color = if (selected) MaterialTheme.colorScheme.onSurface
-                                else MaterialTheme.colorScheme.outline,
-                        shape = CircleShape,
-                    )
-                    .clickable { onPick(rgb) }
-            )
+private fun PresetGrid(selected: String, onPick: (String) -> Unit) {
+    val applied = LocalSingularColors.current
+    // The strip shows the preset's own colours, not the applied theme's â€” the whole point is
+    // comparison between presets. Dark is read off the applied theme so a user flipping the
+    // dark toggle sees each preset in the mode they'd get.
+    val dark = applied.canvas.luminance() < 0.5f
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Presets.all.forEach { preset ->
+            PresetOption(preset, dark, selected = preset.id == selected) { onPick(preset.id) }
         }
     }
 }
 
-private val SWATCHES = listOf(
-    0x3D5AFE, // indigo
-    0x00BFA5, // teal
-    0x23A55A, // green
-    0xF0B232, // amber
-    0xF23F43, // red
-    0xB57EDC, // lilac
-    0xEC4899, // pink
-)
+@Composable
+private fun PresetOption(
+    preset: ThemePreset,
+    dark: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val n = preset.neutrals(dark)
+    val a = preset.accent(dark)
+    val canvas = composite(n.canvas, a.canvasTint)
+    val scheme = MaterialTheme.colorScheme
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(
+                width = if (selected) 2.dp else 1.dp,
+                color = if (selected) scheme.primary else scheme.outline,
+                shape = MaterialTheme.shapes.medium,
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // The strip: canvas â†’ surface â†’ raised, with the accent drawn as a bubble on top so
+        // it's seen in context rather than floating.
+        Box(
+            Modifier
+                .size(width = 84.dp, height = 44.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(canvas)
+                .padding(4.dp),
+            contentAlignment = Alignment.CenterEnd,
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                Box(
+                    Modifier
+                        .size(width = 22.dp, height = 30.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(n.raised)
+                )
+                Box(
+                    Modifier
+                        .size(width = 22.dp, height = 30.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(a.accent)
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(preset.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                preset.blurb,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (selected) {
+            Box(
+                Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(scheme.primary)
+            )
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Profile (feature 13)
@@ -284,7 +345,7 @@ private fun ProfileSection(state: AppState) {
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                     )
-                    // The handle is fixed and shown for reference — it's how people add you,
+                    // The handle is fixed and shown for reference â€” it's how people add you,
                     // and the number is reallocated if you ever rename.
                     Text(
                         me.handle,

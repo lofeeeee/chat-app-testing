@@ -109,11 +109,23 @@ class AppState(
     var myStatus by mutableStateOf("ONLINE")
         private set
 
-    /** Feature 16. 0xRRGGBB, or null to use the app default. */
+    /**
+     * Feature 16. The chosen appearance preset, or null for the app default.
+     *
+     * Presets replaced the two raw accent colours: a hue is not a theme, and deriving one from
+     * two swatches produced something that was technically valid and visually incoherent. See
+     * [app.singular.client.ui.Presets] for the reasoning.
+     */
+    var themePreset by mutableStateOf<String?>(null)
+        private set
+
+    /** 0xRRGGBB, or null. Legacy: only consulted when [themePreset] is null. */
     var themePrimary by mutableStateOf<Int?>(null)
         private set
     var themeSecondary by mutableStateOf<Int?>(null)
         private set
+
+    /** Null follows the operating system. */
     var themeDark by mutableStateOf<Boolean?>(null)
         private set
     var mutedChannels = mutableStateMapOf<String, Boolean>()
@@ -257,6 +269,7 @@ class AppState(
 
     private fun applySettings(s: UserSettingsDto) {
         chatLayout = s.chatLayout
+        themePreset = s.themePreset
         themePrimary = s.themePrimary
         themeSecondary = s.themeSecondary
         themeDark = s.themeDark
@@ -272,19 +285,37 @@ class AppState(
     }
 
     /**
-     * Feature 16. Sends only what changed — the server treats a null field as "leave it", so a
-     * colour change can't clobber a layout switch made a moment earlier on another device.
+     * Feature 16. Switches appearance preset.
+     *
+     * Named `choose` rather than `set` because the class already has a private `themePreset`
+     * setter, and `setThemePreset` collides with it on the JVM — a clash the compiler catches
+     * but that reads as a mystery the first time.
+     *
+     * Sends only what changed — the server treats a null field as "leave it", so a theme change
+     * can't clobber a layout switch made a moment earlier on another device.
+     *
+     * [preset] is a name, not null-to-clear: null already means "leave this field alone", so
+     * "back to the default" has to be a real value. The default preset's own name ([Presets
+     * .default.id]) is that value.
      */
-    fun setTheme(primary: Int?, secondary: Int?, dark: Boolean?) = run {
+    fun chooseThemePreset(preset: String) = run {
         applySettings(
             client.execute<UpdateSettingsData>(
                 Operations.UPDATE_SETTINGS,
                 buildJsonObject {
-                    put("input", buildJsonObject {
-                        primary?.let { put("themePrimary", it) }
-                        secondary?.let { put("themeSecondary", it) }
-                        dark?.let { put("themeDark", it) }
-                    })
+                    put("input", buildJsonObject { put("themePreset", preset) })
+                },
+            ).settings
+        )
+    }
+
+    /** The dark/light override. Null would mean "leave it", so both states are sent explicitly. */
+    fun setThemeDark(dark: Boolean) = run {
+        applySettings(
+            client.execute<UpdateSettingsData>(
+                Operations.UPDATE_SETTINGS,
+                buildJsonObject {
+                    put("input", buildJsonObject { put("themeDark", dark) })
                 },
             ).settings
         )

@@ -177,7 +177,9 @@ private fun BubbleRow(row: RenderedMessage) {
                     message.author.label,
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary,
+                    // accentSoft: a name is text, and needs the accent variant that is legible
+                    // as text on the canvas. `primary` is a fill colour doing a text job.
+                    color = LocalSingularColors.current.accentSoft,
                     modifier = Modifier.padding(start = 12.dp, bottom = 3.dp),
                 )
             }
@@ -195,9 +197,11 @@ private fun Bubble(row: RenderedMessage) {
     var revealed by remember(message.id) { mutableStateOf(false) }
 
     // Square off the corner facing the previous bubble in the run, so a stack reads as one
-    // block instead of a column of identical lozenges.
-    val r = 16.dp
-    val tight = 5.dp
+    // block instead of a column of identical lozenges. Values match SingularShapes.large /
+    // extraSmall — referenced directly rather than via the shapes object because this composable
+    // needs per-corner control, which the Shapes slots can't express.
+    val r = 18.dp
+    val tight = 6.dp
     val shape = if (row.mine) {
         RoundedCornerShape(r, if (row.startsGroup) r else tight, if (row.endsGroup) r else tight, r)
     } else {
@@ -207,9 +211,12 @@ private fun Bubble(row: RenderedMessage) {
     val background =
         if (row.mine) MaterialTheme.colorScheme.primary
         else MaterialTheme.colorScheme.surfaceVariant
+    // onSurfaceVariant, not onSurface: the raised surface is a step away from the base surface,
+    // and its text needs the pairing designed for it. onSurface on raised was the old pairing
+    // and it read slightly too bright, like the bubble was shouting.
     val foreground =
         if (row.mine) MaterialTheme.colorScheme.onPrimary
-        else MaterialTheme.colorScheme.onSurface
+        else MaterialTheme.colorScheme.onSurfaceVariant
 
     Box(Modifier.clip(shape).background(background).padding(horizontal = 12.dp, vertical = 7.dp)) {
         if (message.authorBlocked && !revealed) {
@@ -268,7 +275,9 @@ private fun CompactRow(row: RenderedMessage) {
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                         // Your own name in the accent colour, like Discord's "you" highlight.
-                        color = if (row.mine) MaterialTheme.colorScheme.primary
+                        // accentSoft rather than primary: primary is tuned to be a fill behind
+                        // onAccent, and as text on a dark canvas it can be too dim to read.
+                        color = if (row.mine) LocalSingularColors.current.accentSoft
                                 else MaterialTheme.colorScheme.onSurface,
                     )
                     Spacer(Modifier.width(8.dp))

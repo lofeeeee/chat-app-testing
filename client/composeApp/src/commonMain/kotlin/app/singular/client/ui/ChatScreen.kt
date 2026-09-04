@@ -53,7 +53,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -82,14 +81,10 @@ fun ChatScreen(state: AppState, onOpenSessions: () -> Unit, onOpenSettings: () -
 // Presence
 // ---------------------------------------------------------------------------
 
-/** Discord's colours, because they're the ones people already read without a legend. */
-private fun statusColor(status: String): Color = when (status) {
-    "ONLINE" -> Color(0xFF23A55A)
-    "AWAY" -> Color(0xFFF0B232)
-    "DND" -> Color(0xFFF23F43)
-    else -> Color(0xFF80848E)   // OFFLINE, and INVISIBLE as everyone else sees it
-}
-
+/**
+ * Label only — the colour comes from [Presence.statusColor], defined once in Palette.kt with
+ * the reasoning for why it isn't theme-driven.
+ */
 private fun statusLabel(status: String): String = when (status) {
     "ONLINE" -> "Online"
     "AWAY" -> "Away"
@@ -101,8 +96,11 @@ private fun statusLabel(status: String): String = when (status) {
 /**
  * An avatar with a presence dot notched into its corner.
  *
- * The dot sits on a ring of the surface colour rather than flush against the avatar, so it
+ * The dot sits on a ring of the sidebar colour rather than flush against the avatar, so it
  * stays legible over a busy image — the difference between a readable indicator and a smudge.
+ * The ring reads `notch` from the extended palette rather than `surface`: this composable is
+ * used on the canvas and on cards too, and the notch has to be opaque in whichever of those
+ * it lands on, which is a property `surface` doesn't guarantee.
  */
 @Composable
 private fun AvatarWithStatus(user: UserDto, status: String, size: Int) {
@@ -114,10 +112,10 @@ private fun AvatarWithStatus(user: UserDto, status: String, size: Int) {
                 .offset(x = 2.dp, y = 2.dp)
                 .size((size / 3).coerceAtLeast(10).dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surface)
+                .background(LocalSingularColors.current.notch)
                 .padding(2.dp)
                 .clip(CircleShape)
-                .background(statusColor(status))
+                .background(Presence.statusColor(status))
         )
     }
 }
@@ -153,7 +151,7 @@ private fun ChannelSidebar(
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Box(
                                             Modifier.size(9.dp).clip(CircleShape)
-                                                .background(statusColor(option))
+                                                .background(Presence.statusColor(option))
                                         )
                                         Spacer(Modifier.width(9.dp))
                                         Text(statusLabel(option))

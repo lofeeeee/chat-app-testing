@@ -84,6 +84,11 @@ kotlin {
             implementation(libs.coil.network.ktor)
         }
 
+        commonTest.dependencies {
+            // One test, and it is the contract the whole theme rests on. See ThemeContrastTest.
+            implementation(kotlin("test"))
+        }
+
         if (buildAndroid) {
             androidMain.dependencies {
                 implementation(compose.preview)

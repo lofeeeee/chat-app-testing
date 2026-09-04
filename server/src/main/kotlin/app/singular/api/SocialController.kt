@@ -26,7 +26,21 @@ data class SettingsInput(
     val themePrimary: Int? = null,
     val themeSecondary: Int? = null,
     val themeDark: Boolean? = null,
+    val themePreset: ThemePreset? = null,
 )
+
+/**
+ * The appearance presets the client ships.
+ *
+ * Validated here rather than trusted: the value is persisted and replayed to every device the
+ * user signs in on, so a nonsense string would otherwise be a theme that only exists on one
+ * client and is unparseable on the others. The enum is also the contract — add a preset to the
+ * client, add it here, and both sides stay in step.
+ *
+ * The string forms are stored, never the ordinals: an ordinal silently reassigns everyone's
+ * theme the moment someone inserts a preset in the middle of the list.
+ */
+enum class ThemePreset { EMBER, COCOA, SAGE, DUSK, SLATE }
 
 @Controller
 class SocialController(
@@ -142,6 +156,10 @@ class SocialController(
             themePrimary = input.themePrimary ?: current.themePrimary,
             themeSecondary = input.themeSecondary ?: current.themeSecondary,
             themeDark = input.themeDark ?: current.themeDark,
+            // Enum binding already rejected unknown names, so this is the "explicitly cleared"
+            // case only: a client sending null means leave it, which is why clearing a preset
+            // back to the default is done by sending DEFAULT rather than by sending nothing.
+            themePreset = input.themePreset?.name ?: current.themePreset,
         )
         social.saveSettings(principal.userId, merged)
         return merged
@@ -172,6 +190,17 @@ class SocialController(
 
     @SchemaMapping(typeName = "UserSettings", field = "chatLayout")
     fun settingsLayout(s: UserSettings): String = if (s.chatLayout == 1) "COMPACT" else "BUBBLES"
+
+    /**
+     * The stored string, narrowed to the enum.
+     *
+     * Returns null when absent — meaning "use the app default", which the client resolves — and
+     * when the stored value names a preset this build no longer ships. A retired preset should
+     * send a user to the default theme, not raise an error they can't act on.
+     */
+    @SchemaMapping(typeName = "UserSettings", field = "themePreset")
+    fun settingsPreset(s: UserSettings): ThemePreset? =
+        s.themePreset?.let { runCatching { ThemePreset.valueOf(it) }.getOrNull() }
 
     // -- User field resolvers ------------------------------------------------
 

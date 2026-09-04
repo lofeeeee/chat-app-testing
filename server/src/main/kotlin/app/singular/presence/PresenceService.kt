@@ -1,13 +1,15 @@
 package app.singular.presence
 
+import app.singular.config.SingularProperties
 import app.singular.domain.PresenceStatus
+import app.singular.event.FanoutBus
 import app.singular.social.SocialRepository
+import io.lettuce.core.SetArgs
+import io.lettuce.core.api.StatefulRedisConnection
 import org.springframework.stereotype.Service
 import reactor.core.publisher.Flux
-import reactor.core.publisher.Sinks
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 
 /** What other people see. Never carries INVISIBLE — that is reported as OFFLINE. */
 data class Presence(
@@ -18,38 +20,60 @@ data class Presence(
 )
 
 /**
- * Effective presence.
+ * Effective presence, now shared across nodes.
  *
  * Two things get conflated here constantly, so they are kept apart:
  *
  *   * **Desired status** — what the user picked. Durable, in `users.desired_status`, and it has
  *     to survive a reconnect: someone who sets DND and closes the app is still DND tomorrow.
  *   * **Effective status** — what everyone else sees. Derived from live connections, disposable,
- *     and held here in memory.
+ *     and shared via Valkey.
  *
- * The rule joining them: no live connection means OFFLINE regardless of what was chosen, and
- * INVISIBLE is reported as OFFLINE to everyone but the user themselves. Invisible that leaks as
- * its own state is not invisible.
+ * The rule joining them: no live connection anywhere means OFFLINE regardless of what was
+ * chosen, and INVISIBLE is reported as OFFLINE to everyone but the user themselves. Invisible
+ * that leaks as its own state is not invisible.
  *
- * In-memory and node-local, exactly like [app.singular.message.MessageEvents]. Presence is the
- * single clearest case for Valkey — it changes several times a minute per user and is worthless
- * after a restart — and this class is the seam where that swap happens.
+ * ## How "live" works across nodes
+ *
+ * Every node records, per user it holds connections for: a heartbeat key
+ * `presence:hb:<userId>:<nodeId>` with a 60s TTL (refreshed while the node serves them), and
+ * membership in the set `presence:nodes:<userId>` (so the expiry question is "does this
+ * member's heartbeat key still exist", not a scan). A user is live when ANY member of that
+ * set has a live heartbeat — which is what makes "connected to two nodes, one drops" not
+ * flicker the user offline.
+ *
+ * The set is cleaned lazily on read: a member whose heartbeat expired is removed there and
+ * then, which also covers a node crashing without the courtesy of a goodbye (its keys simply
+ * lapse; its set entries are pruned the next time anyone asks about that user).
+ *
+ * ## Events carry a prompt, not a verdict
+ *
+ * A presence-change event tells subscribers "user X changed — recheck". The subscriber
+ * recomputes from the shared state rather than trusting the event's own status field, so a
+ * user on two nodes can't publish two contradictory verdicts — last write doesn't win, the
+ * shared state does. INVISIBLE never enters an event at all; the publish path collapses it to
+ * OFFLINE the same way `effective` does, so a leak in any consumer is structurally impossible.
  */
 @Service
-class PresenceService(private val social: SocialRepository) {
+class PresenceService(
+    private val social: SocialRepository,
+    private val bus: FanoutBus,
+    private val redis: StatefulRedisConnection<String, String>,
+    private val props: SingularProperties,
+) {
 
-    /** userId -> last heartbeat. A user with no entry is offline, full stop. */
-    private val heartbeats = ConcurrentHashMap<Long, Instant>()
-
-    private val events: Sinks.Many<Presence> = Sinks.many().multicast().directBestEffort()
+    private val sync = redis.sync()
 
     fun heartbeat(userId: Long) {
-        val wasOffline = heartbeats.put(userId, Instant.now()) == null
-        if (wasOffline) publish(userId)
+        sync.set(hbKey(userId, props.nodeId), "1", SetArgs().px(HEARTBEAT_TTL.toMillis()))
+        sync.sadd(nodesKey(userId), props.nodeId.toString())
     }
 
     fun disconnect(userId: Long) {
-        if (heartbeats.remove(userId) != null) publish(userId)
+        // Remove only OUR node's membership. The user may still be connected elsewhere, and
+        // this is the whole reason membership is a set rather than one key.
+        sync.del(hbKey(userId, props.nodeId))
+        sync.srem(nodesKey(userId), props.nodeId.toString())
     }
 
     /** As seen by [viewerId]. Pass the user's own id to see your own INVISIBLE honestly. */
@@ -79,18 +103,32 @@ class PresenceService(private val social: SocialRepository) {
 
     fun setStatus(userId: Long, status: PresenceStatus) {
         social.setDesiredStatus(userId, status)
-        publish(userId)
+        publishChange(userId)
     }
 
     fun setCustomStatus(userId: Long, text: String?, emoji: String?, expiresAt: Instant?) {
         social.setCustomStatus(userId, text, emoji, expiresAt)
-        publish(userId)
+        publishChange(userId)
     }
 
-    fun subscribe(): Flux<Presence> = events.asFlux()
+    /**
+     * The stream other clients subscribe to. The event itself is only a prompt to recheck (see
+     * class doc), so the resolved Presence is computed here, on arrival, rather than being
+     * carried inside the event: that keeps two nodes connected to the same user from ever
+     * publishing contradictory verdicts, and keeps INVISIBLE out of the wire format entirely.
+     *
+     * Viewer is null on this path by construction — the prompt is not person-specific. An
+     * INVISIBLE user therefore shows as OFFLINE here, which is the point of invisible.
+     */
+    fun subscribe(): Flux<Presence> =
+        bus.subscribe<PresenceChange>("presence", "all")
+            .map { change -> presenceOf(change.userId, viewerId = null) }
+
+    /** A nudge to recheck — see the class doc for why the event is not the verdict. */
+    data class PresenceChange(val userId: Long)
 
     private fun effective(userId: Long, desired: PresenceStatus, viewerId: Long?): PresenceStatus {
-        val live = heartbeats[userId]?.let { it.isAfter(Instant.now().minus(TIMEOUT)) } == true
+        val live = isLiveAnywhere(userId)
         return when {
             // You always see your own real state, including INVISIBLE — otherwise the status
             // picker can't show you what you actually selected.
@@ -101,27 +139,36 @@ class PresenceService(private val social: SocialRepository) {
         }
     }
 
-    private fun publish(userId: Long) {
-        // Published without a viewer, so INVISIBLE is already collapsed to OFFLINE. Emitting the
-        // raw desired status here would leak it to every subscriber.
-        val desired = social.desiredStatus(userId)
-        events.tryEmitNext(
-            Presence(
-                userId = userId,
-                status = effective(userId, desired.status, viewerId = null),
-                customText = desired.customText,
-                customEmoji = desired.customEmoji,
-            )
-        )
+    private fun isLiveAnywhere(userId: Long): Boolean {
+        val nodes = sync.smembers(nodesKey(userId))
+        if (nodes.isEmpty()) return false
+
+        var live = false
+        nodes.forEach { nodeId ->
+            if (sync.exists(hbKey(userId, nodeId.toLongOrNull() ?: -1)) == 1L) {
+                live = true
+            } else {
+                // Dead member: heartbeat lapsed (node crash or unannounced disconnect).
+                // Prune now so the set can't grow without bound across weeks of churn.
+                sync.srem(nodesKey(userId), nodeId)
+            }
+        }
+        return live
     }
+
+    private fun publishChange(userId: Long) {
+        bus.publish("presence", "all", PresenceChange(userId))
+    }
+
+    private fun hbKey(userId: Long, nodeId: Long) = "presence:hb:$userId:$nodeId"
+    private fun nodesKey(userId: Long) = "presence:nodes:$userId"
 
     private companion object {
         /**
-         * How long a connection stays "live" without a heartbeat.
-         *
-         * Generous on purpose: a client that briefly loses its socket should not flicker to
-         * offline and back in everyone else's sidebar.
+         * How long a node's heartbeat for a user lasts without a refresh. Generous on purpose:
+         * a client that briefly loses its socket should not flicker the user to offline and
+         * back in everyone else's sidebar.
          */
-        val TIMEOUT: Duration = Duration.ofSeconds(60)
+        val HEARTBEAT_TTL: Duration = Duration.ofSeconds(60)
     }
 }

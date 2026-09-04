@@ -53,6 +53,21 @@ class InvalidInput(message: String) : DomainException(
     message, "BAD_INPUT", SpringErrorType.BAD_REQUEST
 )
 
+/**
+ * The caller is going too fast. Not a credentials problem and not a permissions problem —
+ * deliberately a separate class so clients can render "try again in N seconds" instead of
+ * surfacing a permission error to a user whose only mistake was a double-click.
+ *
+ * HTTP-wise this is 429 territory; GraphQL has no native 429, so it travels as FORBIDDEN with
+ * the `RATE_LIMITED` code and a `retryAfterSeconds` extension — the two things every client
+ * needs to back off correctly.
+ */
+class RateLimited(val retryAfterSeconds: Long) : DomainException(
+    "You're going too fast. Try again in ${retryAfterSeconds}s.",
+    "RATE_LIMITED",
+    SpringErrorType.FORBIDDEN,
+)
+
 class Conflict(message: String) : DomainException(
     message, "CONFLICT", ErrorType.ValidationError
 )
@@ -71,6 +86,19 @@ class DomainExceptionResolver : DataFetcherExceptionResolverAdapter() {
         ex: Throwable,
         env: DataFetchingEnvironment,
     ): GraphQLError? = when (ex) {
+        is RateLimited -> graphql.GraphqlErrorBuilder.newError(env)
+            .message(ex.message)
+            .errorType(ex.classification)
+            .extensions(
+                mapOf(
+                    "code" to ex.code,
+                    // The one number a backing-off client needs; kept out of the prose so it's
+                    // machine-readable without parsing English.
+                    "retryAfterSeconds" to ex.retryAfterSeconds,
+                )
+            )
+            .build()
+
         is DomainException -> graphql.GraphqlErrorBuilder.newError(env)
             .message(ex.message)
             .errorType(ex.classification)

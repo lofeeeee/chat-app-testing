@@ -45,6 +45,16 @@ data class PresenceDto(
 @Serializable
 data class UserSettingsDto(
     val chatLayout: String = "BUBBLES",
+    /**
+     * The preset name, or null for the app default.
+     *
+     * A string and not a sealed type: a future server may ship a preset this build has never
+     * heard of, and the right response is then "fall back to the default", not "fail to
+     * deserialise the user's entire settings payload". Resolution happens in [app.singular.client
+     * .ui.Presets.byId], which is where the fallback lives.
+     */
+    val themePreset: String? = null,
+    /** Legacy raw accents, honoured only when [themePreset] is null. */
     val themePrimary: Int? = null,
     val themeSecondary: Int? = null,
     val themeDark: Boolean? = null,

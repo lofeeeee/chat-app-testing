@@ -19,9 +19,8 @@ import coil3.compose.LocalPlatformContext
 import app.singular.client.ui.LoginScreen
 import app.singular.client.ui.SessionsScreen
 import app.singular.client.ui.SettingsScreen
-import app.singular.client.ui.SingularPalette
 import app.singular.client.ui.SingularTheme
-import androidx.compose.ui.graphics.Color
+import app.singular.client.ui.Presets
 
 @Composable
 fun App(
@@ -58,14 +57,20 @@ fun App(
         true
     }
 
-    // Feature 16: the user's own accent colours, falling back to the app defaults until their
-    // settings have loaded. themeDark stays null to follow the OS unless they overrode it.
+    // Feature 16. A preset if they chose one; otherwise their legacy raw accents if they have
+    // any from before presets existed; otherwise the default theme. That ordering is what keeps
+    // an existing user's saved colours from being discarded by an upgrade.
+    //
+    // themeDark stays null to follow the OS unless they overrode it.
+    val dark = state.themeDark ?: isSystemInDarkTheme()
+    val hasPreset = state.themePreset != null
+
     SingularTheme(
-        primary = state.themePrimary?.let { Color(0xFF000000L.toInt() or it) }
-            ?: SingularPalette.DefaultPrimary,
-        secondary = state.themeSecondary?.let { Color(0xFF000000L.toInt() or it) }
-            ?: SingularPalette.DefaultSecondary,
-        dark = state.themeDark ?: isSystemInDarkTheme(),
+        preset = Presets.byId(state.themePreset),
+        dark = dark,
+        // Supplied only when there is no preset, so they can never both be in play at once.
+        legacyPrimary = if (hasPreset) null else state.themePrimary,
+        legacySecondary = if (hasPreset) null else state.themeSecondary,
     ) {
         Surface(Modifier.fillMaxSize()) {
             when {

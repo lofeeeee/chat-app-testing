@@ -316,9 +316,31 @@ enum ChatLayout {
   COMPACT
 }
 
+"""
+An authored appearance preset. Each one is a complete palette - accent, surfaces, text ramp and
+borders - hand-tuned for both dark and light, rather than a hue the client derives a theme from.
+
+Persisted by name, so adding one is additive and removing one degrades to the default instead of
+shifting every other value.
+"""
+enum ThemePreset {
+  "Warm charcoal, amber accent. The default."
+  EMBER
+  "Deep espresso, terracotta accent."
+  COCOA
+  "Green-cast charcoal, olive accent."
+  SAGE
+  "Plum cast, muted rose accent."
+  DUSK
+  "Cool charcoal, dusty blue accent."
+  SLATE
+}
+
 type UserSettings {
   chatLayout: ChatLayout!
-  "0xRRGGBB, or null for the app default."
+  "Which preset to use. null means the app default."
+  themePreset: ThemePreset
+  "Legacy: raw 0xRRGGBB accents from before presets existed. Honoured when themePreset is null."
   themePrimary: Int
   themeSecondary: Int
   "null follows the operating system."
@@ -327,6 +349,7 @@ type UserSettings {
 
 input SettingsInput {
   chatLayout: ChatLayout
+  themePreset: ThemePreset
   themePrimary: Int
   themeSecondary: Int
   themeDark: Boolean

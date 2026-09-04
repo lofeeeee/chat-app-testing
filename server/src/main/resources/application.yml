@@ -58,9 +58,29 @@ singular:
     # email index entry — treat it as permanent once you have users.
     pepper: ${SINGULAR_PEPPER:dev-only-insecure-pepper-change-me-now}
 
+  # Redis-compatible (RESP) endpoint of the Valkey container from docker-compose. Carries
+  # pub/sub fanout and presence heartbeats — everything here is disposable by design (the
+  # Valkey server runs with no persistence), and the app fails fast if it can't reach it:
+  # a node that quietly fell back to in-memory fanout in a multi-node deployment would
+  # split-brain without anyone noticing, which is strictly worse than not starting.
+  valkey:
+    uri: ${VALKEY_URI:redis://localhost:6380}
+
   limits:
     message-max-length: 4000
     messages-page-size-max: 100
+
+  # One bucket per sensitive scope, per identity (IP for anonymous endpoints, user id when
+  # signed in). capacity = burst size; refill-per-minute = sustained rate. See
+  # SingularProperties.RateLimit for what each one defends against.
+  rate-limit:
+    login:            { capacity: 10, refill-per-minute: 5.0 }    # credential stuffing (per IP)
+    register:         { capacity: 3,  refill-per-minute: 1.0 }    # account farming (per IP)
+    token-refresh:    { capacity: 20, refill-per-minute: 10.0 }   # brute-force of a leaked token (per IP)
+    qr-create:        { capacity: 6,  refill-per-minute: 3.0 }    # unbounded request minting (per IP)
+    qr-rotate:        { capacity: 30, refill-per-minute: 15.0 }   # anonymous rotation edge (per IP)
+    qr-claim:         { capacity: 20, refill-per-minute: 10.0 }   # QR token brute-force (per user)
+    send-message:     { capacity: 30, refill-per-minute: 120.0 }  # flood control (per user)
 
   storage:
     endpoint: ${MINIO_ENDPOINT:http://localhost:9100}
