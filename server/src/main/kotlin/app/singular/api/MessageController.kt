@@ -7,6 +7,9 @@ import app.singular.ratelimit.RateLimiter
 import app.singular.message.Mention
 import app.singular.message.MentionRepository
 import app.singular.message.MessageService
+import app.singular.message.ReactionRepository
+import app.singular.message.ReactionSummary
+import app.singular.message.ReactionUpdate
 import app.singular.message.TypingEvent
 import app.singular.message.TypingEvents
 import app.singular.security.principalOrNull
@@ -38,6 +41,7 @@ class MessageController(
     private val channelService: app.singular.channel.ChannelService,
     private val social: SocialRepository,
     private val mentions: MentionRepository,
+    private val reactions: ReactionRepository,
     private val users: UserRepository,
     private val rateLimiter: RateLimiter,
 ) {
@@ -113,6 +117,25 @@ class MessageController(
         return true
     }
 
+    @MutationMapping
+    fun addReaction(@Argument messageId: Long, @Argument emoji: String, ctx: GraphQLContext): Message =
+        messageService.addReaction(messageId, ctx.requirePrincipal().userId, emoji)
+
+    @MutationMapping
+    fun removeReaction(@Argument messageId: Long, @Argument emoji: String, ctx: GraphQLContext): Message =
+        messageService.removeReaction(messageId, ctx.requirePrincipal().userId, emoji)
+
+    /**
+     * Live reaction counts for a channel, so every viewer's chips update as others react.
+     *
+     * The `me` flag in the payload is resolved against the *actor*, not the subscriber, so it
+     * is meaningless on the wire — clients recompute their own reacted-state locally from the
+     * emoji set and only take the counts from the event.
+     */
+    @SubscriptionMapping
+    fun reactionUpdated(@Argument channelId: Long, ctx: GraphQLContext): Flux<ReactionUpdate> =
+        messageService.subscribeReactions(channelId, ctx.requirePrincipal().userId)
+
     @SubscriptionMapping
     fun typing(@Argument channelId: Long, ctx: GraphQLContext): Flux<TypingEvent> {
         val principal = ctx.requirePrincipal()
@@ -144,6 +167,18 @@ class MessageController(
     @BatchMapping(typeName = "Message", field = "mentions")
     fun messageMentions(messages: List<Message>): Map<Message, List<Mention>> {
         val loaded = mentions.mentionsOf(messages.map { it.id })
+        return messages.associateWith { loaded[it.id].orEmpty() }
+    }
+
+    /**
+     * The reaction chips under each message. Batched for the same reason as mentions — one
+     * grouped query per page, not one per row. `me` is resolved against the requesting viewer
+     * here, so on this read path it is authoritative (unlike on the subscription wire).
+     */
+    @BatchMapping(typeName = "Message", field = "reactions")
+    fun messageReactions(messages: List<Message>, ctx: GraphQLContext): Map<Message, List<ReactionSummary>> {
+        val viewer = ctx.principalOrNull()?.userId ?: 0L
+        val loaded = reactions.summariesFor(messages.map { it.id }, viewer)
         return messages.associateWith { loaded[it.id].orEmpty() }
     }
 

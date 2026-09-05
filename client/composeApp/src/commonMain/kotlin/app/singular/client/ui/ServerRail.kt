@@ -25,13 +25,11 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -250,19 +248,25 @@ private fun AddServerDialog(
  * The server header above the channel list.
  *
  * One row: the server's name and a menu. Everything that was a row of buttons — invite, leave,
- * rename — moved into that menu or into settings, because those are things you do to a server
- * a handful of times, and they were taking three lines of permanent space above the list you
- * came here to use.
+ * rename — lives behind that menu or in the settings screen it opens, because those are things
+ * you do to a server a handful of times, and they were taking three lines of permanent space
+ * above the list you came here to use.
+ *
+ * "Server settings" and "Invite people" both navigate to the settings screen (the latter
+ * straight to its Invites section) rather than doing anything inline — the dropdown is a way
+ * *into* the server's settings, not a second copy of them. Leaving the server is in that
+ * screen's nav footer, behind a confirmation, for the same reason Log out is in app settings'
+ * footer and not in the account bar.
  */
 @Composable
-fun GuildHeader(state: AppState, guild: GuildDto) {
+fun GuildHeader(
+    state: AppState,
+    guild: GuildDto,
+    onOpenServerSettings: (ServerSettingsSection) -> Unit,
+) {
     var menu by remember { mutableStateOf(false) }
-    var settings by remember { mutableStateOf(false) }
     var addingChannel by remember { mutableStateOf(false) }
 
-    if (settings) {
-        ServerSettingsDialog(state, guild) { settings = false }
-    }
     if (addingChannel) {
         NewChannelDialog(
             categories = guild.channels.filter { it.isCategory },
@@ -320,7 +324,7 @@ fun GuildHeader(state: AppState, guild: GuildDto) {
                 DropdownMenuItem(
                     text = { Text("Server settings") },
                     leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },
-                    onClick = { menu = false; settings = true },
+                    onClick = { menu = false; onOpenServerSettings(ServerSettingsSection.OVERVIEW) },
                 )
                 DropdownMenuItem(
                     text = { Text("Create channel") },
@@ -330,27 +334,28 @@ fun GuildHeader(state: AppState, guild: GuildDto) {
                 DropdownMenuItem(
                     text = { Text("Invite people") },
                     leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
-                    onClick = { menu = false; state.createInvite(guild.id); settings = true },
-                )
-                HorizontalDivider()
-                DropdownMenuItem(
-                    text = { Text("Leave server", color = MaterialTheme.colorScheme.error) },
-                    leadingIcon = {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Logout,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                        )
+                    onClick = {
+                        menu = false
+                        onOpenServerSettings(ServerSettingsSection.INVITES)
                     },
-                    onClick = { menu = false; state.leaveGuild(guild.id) },
                 )
+                // No "Leave server" here. It moved to the settings screen's nav footer,
+                // beside a confirmation dialog — the old menu item left the server on a
+                // single click with no way back, which is a lot of consequence for a row
+                // that sits one misclick below "Invite people".
             }
         }
     }
 }
 
+/**
+ * The create-a-channel dialog.
+ *
+ * Shared by the server dropdown and server settings' Channels section — one place that knows
+ * the name-becomes-hyphens rule, so the two can't drift into minting differently-named channels.
+ */
 @Composable
-private fun NewChannelDialog(
+internal fun NewChannelDialog(
     categories: List<ChannelDto>,
     onDismiss: () -> Unit,
     onCreate: (name: String, category: Boolean, parentId: String?) -> Unit,

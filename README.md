@@ -185,13 +185,13 @@ Numbered against the original feature list.
 | 3 | Servers | ✅ create, channels, categories, invites, leave, delete |
 | 4 | Online / Away / DND / Offline | ✅ + Invisible, with heartbeat |
 | 5 | Stories (WhatsApp/Insta style) | ✅ tray, composer, viewer, overlay compositor |
-| 6 | Emoji / files / audio / location | ✅ end to end — pick, upload, render |
+| 6 | Emoji / files / audio / location | ✅ emoji picker (grid, search, recents) with a bundled Noto Color Emoji face; files/audio/location via presigned upload |
 | 7 | Push notifications | 🟡 registration + mute/DND filter done; delivery needs your FCM/APNs keys |
 | 8 | IP/device/agent + action logging | ✅ per-session, not per-message |
 | 9 | "Hashing" | ✅ split into hash vs encrypt |
 | 10 | Server roles | ✅ 128-bit bitfield, hierarchy, channel overwrites |
 | 11 | Blocking + muting | ✅ separate tables, separate semantics |
-| 12 | Tagging / mentions | ✅ parsed on send, mentions inbox |
+| 12 | Tagging / mentions | ✅ @-autocomplete in the composer, `<@id>` highlighting, mentions inbox screen |
 | 13 | Custom pfp / border / banner / about me / handle | ✅ fields, editor, and an upload path |
 | 14 | Per-server nickname | ✅ |
 | 15 | Blocked-but-shared collapse | ✅ both layouts |
@@ -202,7 +202,9 @@ Numbered against the original feature list.
 | 20 | Music on stories | 🟡 overlay model supports it; needs a licensed source |
 
 Plus, not on the original list: QR sign-in with a 20s rotating code, session/device management,
-typing indicators, two chat layouts, Enter-to-send.
+typing indicators, two chat layouts, Enter-to-send, **emoji reactions** (chips under messages,
+long-press quick-react, live counts over `reactionUpdated`), **custom emoji+text status**, and
+**story stickers** (emoji overlays from the picker).
 
 ### What's left
 

@@ -8,30 +8,21 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
-import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -47,11 +38,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.singular.client.AppState
 import app.singular.client.platform.notificationsAvailable
 
@@ -76,23 +67,16 @@ fun SettingsScreen(state: AppState, onClose: () -> Unit) {
 
     Row(Modifier.fillMaxSize()) {
         SettingsNav(
-            section = section,
+            title = "Settings",
+            items = SettingsSection.entries.map { SettingsNavItem(it, it.title, it.blurb) },
+            selected = section,
             onPick = { section = it },
             onClose = onClose,
-            onSignOut = { confirmSignOut = true },
+            footer = { SettingsSignOutButton { confirmSignOut = true } },
         )
         VerticalDivider()
 
-        Column(
-            Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .verticalScroll(rememberScrollState())
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
-        ) {
-            Text(section.title, style = MaterialTheme.typography.headlineSmall)
-
+        SettingsPane(section.title) {
             when (section) {
                 SettingsSection.ACCOUNT -> AccountSection(state)
                 SettingsSection.APPEARANCE -> AppearanceSection(state)
@@ -128,88 +112,36 @@ enum class SettingsSection(val title: String, val blurb: String) {
     ABOUT("About", "Version and shortcuts"),
 }
 
+/**
+ * The nav's last row, alone below its own divider and in the error colour.
+ *
+ * Sign out is the one item in settings that ends what you were doing, so it should not sit in
+ * the same list as "pick a theme" — the same rule the server settings screen follows for
+ * leaving a server.
+ */
 @Composable
-private fun SettingsNav(
-    section: SettingsSection,
-    onPick: (SettingsSection) -> Unit,
-    onClose: () -> Unit,
-    onSignOut: () -> Unit,
-) {
-    Column(
+private fun SettingsSignOutButton(onSignOut: () -> Unit) {
+    Row(
         Modifier
-            .width(240.dp)
-            .fillMaxHeight()
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(vertical = 10.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = onSignOut)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 8.dp, end = 12.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // A back arrow, matching Stories. "Done" implied there was something to submit;
-            // every control here saves the moment you change it.
-            IconButton(onClick = onClose) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-            }
-            Spacer(Modifier.width(4.dp))
-            Text("Settings", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        }
-        HorizontalDivider()
-        Spacer(Modifier.height(6.dp))
-
-        SettingsSection.entries.forEach { entry ->
-            val active = entry == section
-            Column(
-                Modifier
-                    .padding(horizontal = 8.dp, vertical = 1.dp)
-                    .fillMaxWidth()
-                    .clip(MaterialTheme.shapes.small)
-                    .background(
-                        if (active) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent
-                    )
-                    .clickable { onPick(entry) }
-                    .padding(horizontal = 12.dp, vertical = 9.dp),
-            ) {
-                Text(
-                    entry.title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                )
-                Text(
-                    entry.blurb,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        Spacer(Modifier.weight(1f))
-        HorizontalDivider()
-
-        // Last, separated, and in the error colour. Sign out is the one item here that ends
-        // what you were doing, so it should not sit in the same list as "pick a theme".
-        Row(
-            Modifier
-                .padding(horizontal = 8.dp, vertical = 6.dp)
-                .fillMaxWidth()
-                .clip(MaterialTheme.shapes.small)
-                .clickable(onClick = onSignOut)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                Icons.AutoMirrored.Filled.Logout,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.error,
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(
-                "Log out",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
+        Icon(
+            Icons.AutoMirrored.Filled.Logout,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.error,
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            "Log out",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+        )
     }
 }
 
@@ -249,59 +181,57 @@ private fun SignOutDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
 
 @Composable
 private fun AppearanceSection(state: AppState) {
-    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Appearance", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    SettingsCard {
+        Text("Appearance", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
 
-            Text("Chat layout", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                LayoutOption(
-                    title = "Bubbles",
-                    description = "Yours on the right, time inside the bubble.",
-                    selected = state.chatLayout == "BUBBLES",
-                    onClick = { state.setLayout("BUBBLES") },
-                    modifier = Modifier.weight(1f),
-                ) { BubblePreview() }
-                LayoutOption(
-                    title = "Compact",
-                    description = "Denser, everything left-aligned.",
-                    selected = state.chatLayout == "COMPACT",
-                    onClick = { state.setLayout("COMPACT") },
-                    modifier = Modifier.weight(1f),
-                ) { CompactPreview() }
-            }
+        Text("Chat layout", style = MaterialTheme.typography.labelLarge)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            LayoutOption(
+                title = "Bubbles",
+                description = "Yours on the right, time inside the bubble.",
+                selected = state.chatLayout == "BUBBLES",
+                onClick = { state.setLayout("BUBBLES") },
+                modifier = Modifier.weight(1f),
+            ) { BubblePreview() }
+            LayoutOption(
+                title = "Compact",
+                description = "Denser, everything left-aligned.",
+                selected = state.chatLayout == "COMPACT",
+                onClick = { state.setLayout("COMPACT") },
+                modifier = Modifier.weight(1f),
+            ) { CompactPreview() }
+        }
 
-            HorizontalDivider()
+        HorizontalDivider()
 
-            Text("Theme", style = MaterialTheme.typography.labelLarge)
-            Text(
-                "Each theme is a finished palette, tuned for dark and light. " +
-                    "Your choice follows your account to every device.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            PresetGrid(
-                selected = state.themePreset ?: Presets.default.id,
-                onPick = { state.chooseThemePreset(it) },
-            )
+        Text("Theme", style = MaterialTheme.typography.labelLarge)
+        Text(
+            "Each theme is a finished palette, tuned for dark and light. " +
+                "Your choice follows your account to every device.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        PresetGrid(
+            selected = state.themePreset ?: Presets.default.id,
+            onPick = { state.chooseThemePreset(it) },
+        )
 
-            HorizontalDivider()
+        HorizontalDivider()
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Dark theme", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        if (state.themeDark == null) "Following your system setting"
-                        else "Set manually",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = state.themeDark ?: true,
-                    onCheckedChange = { state.setThemeDark(it) },
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Dark theme", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (state.themeDark == null) "Following your system setting"
+                    else "Set manually",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            Switch(
+                checked = state.themeDark ?: true,
+                onCheckedChange = { state.setThemeDark(it) },
+            )
         }
     }
 }
@@ -512,120 +442,186 @@ private fun AccountSection(state: AppState) {
     // different number than the one that went in, and the field has to show what you got.
     var username by remember(me.handle) { mutableStateOf(me.username) }
 
-    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("Profile picture", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    SettingsCard {
+        Text("Profile picture", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // The circle is the button. Clicking your own picture to change it is what
-                // people try first, and a picture that ignores the click reads as broken —
-                // so both this and the button beside it do the same thing.
-                ProfilePicture(
-                    user = me,
-                    label = displayName.ifBlank { me.username },
-                    enabled = state.uploadProgress == null,
-                    onClick = { state.changeAvatar() },
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // The circle is the button. Clicking your own picture to change it is what
+            // people try first, and a picture that ignores the click reads as broken —
+            // so both this and the button beside it do the same thing.
+            AvatarPicker(
+                size = 84.dp,
+                enabled = state.uploadProgress == null,
+                onClick = { state.changeAvatar() },
+            ) {
+                UserAvatar(user = me, label = displayName.ifBlank { me.username }, size = 84)
+            }
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    displayName.ifBlank { me.username },
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
                 )
-                Spacer(Modifier.width(16.dp))
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        displayName.ifBlank { me.username },
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        me.handle,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Button(
-                        onClick = { state.changeAvatar() },
-                        enabled = state.uploadProgress == null,
-                    ) { Text(if (me.avatarUrl == null) "Upload a picture" else "Change picture") }
+                Text(
+                    me.handle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(
+                    onClick = { state.changeAvatar() },
+                    enabled = state.uploadProgress == null,
+                ) { Text(if (me.avatarUrl == null) "Upload a picture" else "Change picture") }
+            }
+        }
+
+        state.uploadProgress?.let {
+            LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth())
+        }
+    }
+
+    // -- Custom status --------------------------------------------------------
+
+    // The emoji + text status shown beside your presence dot. The server has carried this
+    // field since presence shipped; this editor is the first UI that writes it.
+    var statusEmoji by remember(me.id) { mutableStateOf(me.presence?.customEmoji ?: "") }
+    var statusText by remember(me.id) { mutableStateOf(me.presence?.customText ?: "") }
+    var statusEmojiPicker by remember { mutableStateOf(false) }
+    val statusRecents = rememberRecentEmoji()
+
+    SettingsCard {
+        Text("Custom status", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Shown beside your presence dot, on your profile and in the sidebar. " +
+                "Clear both fields to remove it.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // The emoji half. A preview button that opens the picker — same pattern as
+            // AvatarPicker: the thing itself is the button.
+            Box(
+                Modifier
+                    .size(52.dp)
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable { statusEmojiPicker = !statusEmojiPicker },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (statusEmoji.isBlank()) {
+                    Text("😀", fontSize = 24.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Text(statusEmoji, fontSize = 24.sp)
                 }
             }
-
-            state.uploadProgress?.let {
-                LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth())
-            }
-        }
-    }
-
-    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("Username", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(
-                "Your handle is your username plus a number. Several people can be " +
-                    "“${me.username}” — only one can be “${me.handle}”.\n\n" +
-                    "Renaming keeps your number when it's free under the new name, so " +
-                    "${me.username}#${me.discriminator.toString().padStart(4, '0')} → other → " +
-                    "back gives you the same handle again. If someone claimed it meanwhile, " +
-                    "you come back with a new number.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = username,
-                    onValueChange = { username = it.take(32) },
-                    label = { Text("Username") },
-                    supportingText = { Text("2–32 characters: letters, numbers, _ and .") },
-                    singleLine = true,
-                    isError = username.isNotBlank() && !USERNAME_RE.matches(username),
-                    modifier = Modifier.weight(1f),
-                )
-                Spacer(Modifier.width(10.dp))
-                Button(
-                    onClick = { state.changeUsername(username) },
-                    enabled = !state.busy &&
-                        USERNAME_RE.matches(username) &&
-                        username != me.username,
-                ) { Text("Change") }
-            }
-        }
-    }
-
-    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("Profile", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-
+            Spacer(Modifier.width(12.dp))
             OutlinedTextField(
-                value = displayName,
-                onValueChange = { displayName = it },
-                label = { Text("Display name") },
-                supportingText = { Text("What people see. Your handle doesn't change.") },
+                value = statusText,
+                onValueChange = { statusText = it.take(64) },
+                label = { Text("What's happening?") },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.weight(1f),
             )
-            OutlinedTextField(
-                value = pronouns,
-                onValueChange = { pronouns = it.take(40) },
-                label = { Text("Pronouns") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = bio,
-                onValueChange = { bio = it.take(512) },
-                label = { Text("About me") },
-                supportingText = { Text("${bio.length} / 512") },
-                minLines = 3,
-                maxLines = 6,
-                modifier = Modifier.fillMaxWidth(),
-            )
+        }
 
+        if (statusEmojiPicker) {
+            EmojiPicker(
+                recents = statusRecents,
+                onPick = { emoji -> statusEmoji = emoji; statusEmojiPicker = false },
+                onClose = { statusEmojiPicker = false },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = {
-                    state.saveProfile(
-                        displayName.trim().ifEmpty { null },
-                        bio.trim(),
-                        pronouns.trim(),
-                        null,
+                    state.setCustomStatus(
+                        emoji = statusEmoji.trim().ifEmpty { null },
+                        text = statusText.trim().ifEmpty { null },
                     )
                 },
                 enabled = !state.busy,
-            ) { Text("Save profile") }
+            ) { Text("Save") }
+            TextButton(onClick = {
+                statusEmoji = ""
+                statusText = ""
+                state.setCustomStatus(emoji = null, text = null)
+            }) { Text("Clear") }
         }
+    }
+
+    SettingsCard {
+        Text("Username", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Your handle is your username plus a number. Several people can be " +
+                "“${me.username}” — only one can be “${me.handle}”.\n\n" +
+                "Renaming keeps your number when it's free under the new name, so " +
+                "${me.username}#${me.discriminator.toString().padStart(4, '0')} → other → " +
+                "back gives you the same handle again. If someone claimed it meanwhile, " +
+                "you come back with a new number.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = username,
+                onValueChange = { username = it.take(32) },
+                label = { Text("Username") },
+                supportingText = { Text("2–32 characters: letters, numbers, _ and .") },
+                singleLine = true,
+                isError = username.isNotBlank() && !USERNAME_RE.matches(username),
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(10.dp))
+            Button(
+                onClick = { state.changeUsername(username) },
+                enabled = !state.busy &&
+                    USERNAME_RE.matches(username) &&
+                    username != me.username,
+            ) { Text("Change") }
+        }
+    }
+
+    SettingsCard {
+        Text("Profile", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+
+        OutlinedTextField(
+            value = displayName,
+            onValueChange = { displayName = it },
+            label = { Text("Display name") },
+            supportingText = { Text("What people see. Your handle doesn't change.") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = pronouns,
+            onValueChange = { pronouns = it.take(40) },
+            label = { Text("Pronouns") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = bio,
+            onValueChange = { bio = it.take(512) },
+            label = { Text("About me") },
+            supportingText = { Text("${bio.length} / 512") },
+            minLines = 3,
+            maxLines = 6,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Button(
+            onClick = {
+                state.saveProfile(
+                    displayName.trim().ifEmpty { null },
+                    bio.trim(),
+                    pronouns.trim(),
+                    null,
+                )
+            },
+            enabled = !state.busy,
+        ) { Text("Save profile") }
     }
 }
 
@@ -633,56 +629,24 @@ private fun AccountSection(state: AppState) {
 private val USERNAME_RE = Regex("^[A-Za-z0-9_.]{2,32}$")
 
 /**
- * Your picture, and the control that changes it.
+ * Your avatar, as [AvatarPicker]'s picture: the photo when there is one, your initial when
+ * there isn't.
  *
- * A camera badge over the corner, because a bare circle gives no hint it is clickable — and a
- * profile picture that silently ignores a click is the single most common thing people report
- * as broken in a settings screen.
+ * Keyed on [UserDto.avatarKey], never the URL — presigned URLs change on every fetch and would
+ * miss the cache on every redraw.
  */
 @Composable
-private fun ProfilePicture(
-    user: app.singular.client.net.UserDto,
-    label: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    Box(
-        Modifier
-            .size(84.dp)
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        val url = user.avatarUrl
-        if (url != null) {
-            RemoteImage(
-                url = url,
-                // The key, not the URL — presigned URLs change every fetch and would miss the
-                // cache on every redraw.
-                stableKey = user.avatarKey ?: user.id,
-                contentDescription = "Your profile picture",
-                modifier = Modifier.size(84.dp),
-            )
-        } else {
-            Avatar(user.id, label, 84)
-        }
-
-        Box(
-            Modifier
-                .align(Alignment.BottomEnd)
-                .size(26.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                Icons.Filled.PhotoCamera,
-                contentDescription = "Change your picture",
-                modifier = Modifier.size(15.dp),
-                tint = MaterialTheme.colorScheme.onPrimary,
-            )
-        }
+internal fun UserAvatar(user: app.singular.client.net.UserDto, label: String, size: Int) {
+    val url = user.avatarUrl
+    if (url != null) {
+        RemoteImage(
+            url = url,
+            stableKey = user.avatarKey ?: user.id,
+            contentDescription = "Your profile picture",
+            modifier = Modifier.size(size.dp),
+        )
+    } else {
+        Avatar(user.id, label, size)
     }
 }
 
@@ -698,37 +662,35 @@ private fun PrivacySection(state: AppState) {
         .filter { it.blockedByViewer && it.id != state.currentUser?.id }
         .distinctBy { it.id }
 
-    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Blocked people", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    SettingsCard {
+        Text("Blocked people", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Their messages collapse behind a notice instead of disappearing, so a " +
+                "conversation still reads in order. They aren't told.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        if (blocked.isEmpty()) {
             Text(
-                "Their messages collapse behind a notice instead of disappearing, so a " +
-                    "conversation still reads in order. They aren't told.",
+                "You haven't blocked anyone.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-
-            if (blocked.isEmpty()) {
-                Text(
-                    "You haven't blocked anyone.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                blocked.forEach { person ->
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Avatar(person.id, person.label, 32)
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(person.label, style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                person.handle,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        TextButton(onClick = { state.unblockUser(person.id) }) { Text("Unblock") }
+        } else {
+            blocked.forEach { person ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Avatar(person.id, person.label, 32)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(person.label, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            person.handle,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
+                    TextButton(onClick = { state.unblockUser(person.id) }) { Text("Unblock") }
                 }
             }
         }
@@ -739,37 +701,35 @@ private fun PrivacySection(state: AppState) {
 private fun NotificationsSection(state: AppState) {
     val muted = state.channels.filter { state.mutedChannels[it.id] == true }
 
-    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Muted conversations", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    SettingsCard {
+        Text("Muted conversations", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            if (notificationsAvailable) {
+                "Desktop notifications are on. You're told about messages in " +
+                    "conversations you don't have open, except muted ones."
+            } else {
+                "This device can't show notifications — the system tray is unavailable. " +
+                    "Messages still arrive; nothing pops up."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        if (muted.isEmpty()) {
             Text(
-                if (notificationsAvailable) {
-                    "Desktop notifications are on. You're told about messages in " +
-                        "conversations you don't have open, except muted ones."
-                } else {
-                    "This device can't show notifications — the system tray is unavailable. " +
-                        "Messages still arrive; nothing pops up."
-                },
+                "Nothing is muted.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-
-            if (muted.isEmpty()) {
-                Text(
-                    "Nothing is muted.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                muted.forEach { channel ->
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            channel.title(state.currentUser?.id),
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = { state.toggleMute(channel.id) }) { Text("Unmute") }
-                    }
+        } else {
+            muted.forEach { channel ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        channel.title(state.currentUser?.id),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { state.toggleMute(channel.id) }) { Text("Unmute") }
                 }
             }
         }
@@ -778,33 +738,31 @@ private fun NotificationsSection(state: AppState) {
 
 @Composable
 private fun AboutSection() {
-    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Singular", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(
-                "A Kotlin Multiplatform client drawn with Compose — no webview, no bundled " +
-                    "browser. Every library is vendored offline.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            HorizontalDivider()
-            Text("Keyboard shortcuts", style = MaterialTheme.typography.labelLarge)
-            // The same list F1 shows, from the same source — so it cannot drift.
-            Shortcuts.entries.forEach { entry ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-                    Text(
-                        entry.keys,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.width(170.dp),
-                    )
-                    Text(
-                        entry.description,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
+    SettingsCard {
+        Text("Singular", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            "A Kotlin Multiplatform client drawn with Compose — no webview, no bundled " +
+                "browser. Every library is vendored offline.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        HorizontalDivider()
+        Text("Keyboard shortcuts", style = MaterialTheme.typography.labelLarge)
+        // The same list F1 shows, from the same source — so it cannot drift.
+        Shortcuts.entries.forEach { entry ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                Text(
+                    entry.keys,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.width(170.dp),
+                )
+                Text(
+                    entry.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }

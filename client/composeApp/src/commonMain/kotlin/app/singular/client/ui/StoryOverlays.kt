@@ -345,7 +345,14 @@ private fun StoryText(
 
 @Composable
 private fun StickerOverlay(overlay: StoryOverlay) {
-    Text(overlay.value.orEmpty(), fontSize = 44.sp)
+    // The bundled emoji font, not the platform's: stickers are the one place a story is
+    // *mostly* emoji, and per-platform glyphs here would change the look of a story between
+    // the phone that posted it and the desktop reading it.
+    Text(
+        overlay.value.orEmpty(),
+        fontSize = (overlay.size?.toInt() ?: 44).sp,
+        fontFamily = emojiFontFamily(),
+    )
 }
 
 /**

@@ -55,6 +55,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.singular.client.AppState
 import app.singular.client.platform.PickedFile
 
@@ -188,6 +189,16 @@ fun StoryEditor(state: AppState, onClose: () -> Unit) {
                     }
                 }
 
+                // Stickers: emoji placed on the frame. The renderer has understood the
+                // "sticker" overlay type since stories shipped; this is the picker that was
+                // missing, so an emoji can finally become one without hand-writing JSON.
+                StickerPickerSection(
+                    onPick = { emoji ->
+                        elements.add(newStickerElement(emoji, y = 0.3f + 0.16f * (elements.size % 4)))
+                        selected = elements.lastIndex
+                    },
+                )
+
                 TextElementList(
                     elements = elements,
                     selected = selected,
@@ -225,6 +236,76 @@ private fun newTextElement(y: Float) = StoryOverlay(
     font = "sans",
     size = 26f,
     align = "center",
+)
+
+/**
+ * A fresh sticker: one emoji, drawn large. `size` is what the canvas scales, so 56 is roughly
+ * a text element at 26 with the glyph's natural padding.
+ */
+private fun newStickerElement(emoji: String, y: Float) = StoryOverlay(
+    type = "sticker",
+    x = 0.5f,
+    y = y,
+    value = emoji,
+    size = 56f,
+)
+
+/**
+ * The sticker picker: a collapsible strip of the emoji people actually stick on photos.
+ *
+ * A curated row rather than the full [EmojiPicker] grid: this sits inside the editor's
+ * inspector column, and a 300dp-tall grid would push the text controls below the fold on
+ * every open. Everything on offer is one tap away; anything exotic can go through a text
+ * element's emoji.
+ */
+@Composable
+private fun StickerPickerSection(onPick: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Column {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Stickers", style = MaterialTheme.typography.titleSmall)
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(if (expanded) "Hide" else "Browse")
+            }
+        }
+
+        // The always-visible quick row.
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            STICKER_QUICK_ROW.forEach { emoji ->
+                val font = emojiFontFamily()
+                Text(
+                    emoji,
+                    fontFamily = font,
+                    fontSize = 26.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onPick(emoji) }
+                        .padding(4.dp),
+                )
+            }
+        }
+
+        if (expanded) {
+            Spacer(Modifier.height(8.dp))
+            val recents = rememberRecentEmoji()
+            EmojiPicker(
+                recents = recents,
+                onPick = { emoji -> onPick(emoji); expanded = false },
+                onClose = { expanded = false },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+/** The stickers one tap away without expanding the full picker. */
+private val STICKER_QUICK_ROW = listOf(
+    "❤️", "😂", "🔥", "🎉", "😍", "😎", "👍", "💯",
 )
 
 // ---------------------------------------------------------------------------

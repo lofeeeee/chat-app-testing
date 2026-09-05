@@ -31,6 +31,8 @@ object Operations {
             author { ...UserFields }
             attachments { ...AttachmentFields }
             location { latitude longitude label expiresAt }
+            mentions { type targetId }
+            reactions { emoji count me }
         }
     """
 
@@ -311,6 +313,53 @@ object Operations {
         $MESSAGE_FIELDS
         subscription OnNotification { notifications { ...MessageFields } }
     """
+
+    val ADD_REACTION = """
+        $USER_FIELDS
+        $ATTACHMENT_FIELDS
+        $MESSAGE_FIELDS
+        mutation AddReaction(${'$'}messageId: Snowflake!, ${'$'}emoji: String!) {
+            addReaction(messageId: ${'$'}messageId, emoji: ${'$'}emoji) { ...MessageFields }
+        }
+    """
+
+    val REMOVE_REACTION = """
+        $USER_FIELDS
+        $ATTACHMENT_FIELDS
+        $MESSAGE_FIELDS
+        mutation RemoveReaction(${'$'}messageId: Snowflake!, ${'$'}emoji: String!) {
+            removeReaction(messageId: ${'$'}messageId, emoji: ${'$'}emoji) { ...MessageFields }
+        }
+    """
+
+    /**
+     * Live reaction snapshots for the open channel. The wire `me` reflects the actor, so the
+     * client only reads the emoji/count here and recomputes its own reacted-state locally.
+     */
+    val REACTION_UPDATED = """
+        subscription OnReaction(${'$'}channelId: Snowflake!) {
+            reactionUpdated(channelId: ${'$'}channelId) {
+                messageId channelId
+                reactions { emoji count me }
+            }
+        }
+    """
+
+    /** Feature 12's inbox: every message that mentions you, newest first. */
+    val MENTION_INBOX = """
+        $USER_FIELDS
+        $ATTACHMENT_FIELDS
+        $MESSAGE_FIELDS
+        query MentionInbox(${'$'}limit: Int) {
+            mentionInbox(limit: ${'$'}limit) { ...MessageFields }
+        }
+    """
+
+    val SET_CUSTOM_STATUS = """
+        mutation SetCustomStatus(${'$'}text: String, ${'$'}emoji: String) {
+            setCustomStatus(text: ${'$'}text, emoji: ${'$'}emoji) { userId status customText customEmoji }
+        }
+    """
 }
 
 /** Session management and QR sign-in. Kept apart from [Operations] purely for readability. */
@@ -410,7 +459,17 @@ object GuildOperations {
             id name iconKey iconUrl description ownerId myPermissions
             channels { id type name lastMessageId parentId }
             roles { id name color position permissions hoist mentionable isDefault }
-            me { guildId nickname displayName user { ...UserFields } }
+            me {
+                guildId nickname displayName
+                roles { id name color position permissions hoist mentionable isDefault }
+                user { ...UserFields }
+            }
+        }
+    """
+
+    private const val ROLE_FIELDS = """
+        fragment RoleFields on Role {
+            id name color position permissions hoist mentionable isDefault
         }
     """
 
@@ -485,12 +544,70 @@ object GuildOperations {
     """
 
     val SET_NICKNAME = """
-        mutation SetNickname(${'$'}guildId: Snowflake!, ${'$'}nickname: String) {
-            setNickname(guildId: ${'$'}guildId, nickname: ${'$'}nickname)
+        mutation SetNickname(${'$'}guildId: Snowflake!, ${'$'}userId: Snowflake, ${'$'}nickname: String) {
+            setNickname(guildId: ${'$'}guildId, userId: ${'$'}userId, nickname: ${'$'}nickname)
         }
     """
 
     val LEAVE_GUILD = """
         mutation LeaveGuild(${'$'}id: Snowflake!) { leaveGuild(id: ${'$'}id) }
+    """
+
+    // -- Roles ---------------------------------------------------------------
+
+    val CREATE_ROLE = """
+        $ROLE_FIELDS
+        mutation CreateRole(${'$'}guildId: Snowflake!, ${'$'}name: String!, ${'$'}color: Int) {
+            createRole(guildId: ${'$'}guildId, name: ${'$'}name, color: ${'$'}color) {
+                ...RoleFields
+            }
+        }
+    """
+
+    val UPDATE_ROLE = """
+        $ROLE_FIELDS
+        mutation UpdateRole(
+            ${'$'}roleId: Snowflake!, ${'$'}name: String, ${'$'}color: Int,
+            ${'$'}hoist: Boolean, ${'$'}mentionable: Boolean
+        ) {
+            updateRole(
+                roleId: ${'$'}roleId, name: ${'$'}name, color: ${'$'}color,
+                hoist: ${'$'}hoist, mentionable: ${'$'}mentionable
+            ) {
+                ...RoleFields
+            }
+        }
+    """
+
+    val DELETE_ROLE = """
+        mutation DeleteRole(${'$'}roleId: Snowflake!) { deleteRole(roleId: ${'$'}roleId) }
+    """
+
+    val ASSIGN_ROLE = """
+        mutation AssignRole(
+            ${'$'}guildId: Snowflake!, ${'$'}userId: Snowflake!, ${'$'}roleId: Snowflake!
+        ) {
+            assignRole(guildId: ${'$'}guildId, userId: ${'$'}userId, roleId: ${'$'}roleId)
+        }
+    """
+
+    val UNASSIGN_ROLE = """
+        mutation UnassignRole(
+            ${'$'}guildId: Snowflake!, ${'$'}userId: Snowflake!, ${'$'}roleId: Snowflake!
+        ) {
+            unassignRole(guildId: ${'$'}guildId, userId: ${'$'}userId, roleId: ${'$'}roleId)
+        }
+    """
+
+    // -- Moderation ----------------------------------------------------------
+
+    val KICK_MEMBER = """
+        mutation KickMember(${'$'}guildId: Snowflake!, ${'$'}userId: Snowflake!) {
+            kickMember(guildId: ${'$'}guildId, userId: ${'$'}userId)
+        }
+    """
+
+    val DELETE_INVITE = """
+        mutation DeleteInvite(${'$'}code: String!) { deleteInvite(code: ${'$'}code) }
     """
 }

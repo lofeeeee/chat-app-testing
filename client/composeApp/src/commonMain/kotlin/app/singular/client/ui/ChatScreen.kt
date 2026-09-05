@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.AmpStories
+import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Settings
@@ -46,6 +47,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -75,6 +77,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.singular.client.AppState
 import app.singular.client.net.ChannelDto
 import app.singular.client.net.GuildDto
@@ -86,6 +89,8 @@ fun ChatScreen(
     onOpenSessions: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenStories: () -> Unit,
+    onOpenMentions: () -> Unit,
+    onOpenServerSettings: (ServerSettingsSection) -> Unit,
 ) {
     // Focus targets the shortcuts hand control to. Held here rather than inside the two
     // composables that own the fields, because Ctrl+E is pressed from anywhere on the screen —
@@ -143,7 +148,8 @@ fun ChatScreen(
 
         ServerRail(state, Modifier.width(72.dp))
         ChannelSidebar(
-            state, onOpenSessions, onOpenSettings, onOpenStories, handleFocus,
+            state, onOpenSessions, onOpenSettings, onOpenStories, onOpenMentions,
+            onOpenServerSettings, handleFocus,
             tab, onTabChange = { tab = it },
             Modifier.width(260.dp).fillMaxHeight(),
         )
@@ -220,6 +226,8 @@ private fun ChannelSidebar(
     onOpenSessions: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenStories: () -> Unit,
+    onOpenMentions: () -> Unit,
+    onOpenServerSettings: (ServerSettingsSection) -> Unit,
     handleFocus: FocusRequester,
     tab: HomeTab,
     onTabChange: (HomeTab) -> Unit,
@@ -230,12 +238,12 @@ private fun ChannelSidebar(
             // One or the other, never both: `selectedGuild` is the single variable deciding
             // whether this column is a server's channel list or your own conversations.
             val guild = state.selectedGuild
-            if (guild != null) GuildChannelList(state, guild)
+            if (guild != null) GuildChannelList(state, guild, onOpenServerSettings)
             else DirectMessageHome(state, tab, handleFocus, onTabChange)
         }
 
         HorizontalDivider()
-        ProfileBar(state, onOpenStories, onOpenSessions, onOpenSettings)
+        ProfileBar(state, onOpenStories, onOpenSessions, onOpenSettings, onOpenMentions)
     }
 }
 
@@ -480,7 +488,11 @@ private fun DirectMessageRow(
  * no heading; real categories (`GUILD_CATEGORY` channels) are used when a server has them.
  */
 @Composable
-private fun GuildChannelList(state: AppState, guild: GuildDto) {
+private fun GuildChannelList(
+    state: AppState,
+    guild: GuildDto,
+    onOpenServerSettings: (ServerSettingsSection) -> Unit,
+) {
     // Collapsed set, keyed by category id. Local to the composable: which groups you folded
     // is a glance-level preference, not something worth a round trip to store.
     val collapsed = remember(guild.id) { mutableStateListOf<String>() }
@@ -496,7 +508,7 @@ private fun GuildChannelList(state: AppState, guild: GuildDto) {
     val grouped = text.groupBy { it.parentId }
 
     Column(Modifier.fillMaxSize()) {
-        GuildHeader(state, guild)
+        GuildHeader(state, guild, onOpenServerSettings)
         HorizontalDivider()
 
         LazyColumn(Modifier.weight(1f)) {
@@ -668,6 +680,7 @@ private fun ProfileBar(
     onOpenStories: () -> Unit,
     onOpenSessions: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenMentions: () -> Unit,
 ) {
     var statusMenu by remember { mutableStateOf(false) }
     val me = state.currentUser ?: return
@@ -697,12 +710,24 @@ private fun ProfileBar(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        statusLabel(state.myStatus),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
+                    // Custom status line: emoji + text when set, plain presence label otherwise.
+                    val custom = state.customStatusOf(me.id)
+                    if (custom == null) {
+                        Text(
+                            statusLabel(state.myStatus),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    } else {
+                        Text(
+                            custom,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
 
@@ -735,8 +760,9 @@ private fun ProfileBar(
 
         Spacer(Modifier.weight(1f))
 
-        // Compact icons: the bar is 260dp wide and these three have to fit beside a name.
+        // Compact icons: the bar is 260dp wide and these four have to fit beside a name.
         listOf(
+            Triple(Icons.Filled.AlternateEmail, "Mentions", onOpenMentions),
             Triple(Icons.Filled.AmpStories, "Stories", onOpenStories),
             Triple(Icons.Filled.Devices, "Devices and sign-ins", onOpenSessions),
             Triple(Icons.Filled.Settings, "Settings", onOpenSettings),
@@ -758,6 +784,31 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
     val listState = rememberLazyListState()
     val channel = state.selectedChannel ?: return
     val other = channel.members.firstOrNull { it.id != state.currentUser?.id }
+
+    // @-autocomplete state. The token is recomputed from the draft on every change; the
+    // popup is shown exactly while a token is active and something matches it.
+    val isGuildChannel = state.selectedGuild?.channels?.any { it.id == channel.id } == true
+
+    // The emoji panel and the reaction sheet. One `pickerTarget` field drives both: null =
+    // closed, "composer" = inserting into the draft, anything else = reacting to that message.
+    var pickerTarget by remember { mutableStateOf<String?>(null) }
+    val recents = rememberRecentEmoji()
+
+    // Resolves <@id> and friends for rendering. Built from every user the client knows about
+    // in this conversation plus the guild's roles/channels, and rebuilt when they change.
+    val resolver = remember(state.messages, state.channelMembers, state.selectedGuild, state.currentUser?.id) {
+        val users = buildMap {
+            state.messages.forEach { put(it.author.id, it.author) }
+            channel.members.forEach { put(it.id, it) }
+            state.channelMembers.forEach { put(it.user.id, it.user) }
+        }
+        val roles = state.selectedGuild?.roles
+            ?.associate { it.id to it.name } ?: emptyMap()
+        val channelNames = state.selectedGuild?.channels
+            ?.filter { !it.isCategory && it.name != null }
+            ?.associate { it.id to it.name!! } ?: emptyMap()
+        MentionResolver(users, roles, channelNames, state.currentUser?.id)
+    }
 
     LaunchedEffect(state.messages.size, channel.id) {
         if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
@@ -811,13 +862,18 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
         }
         HorizontalDivider()
 
-        MessageList(
-            messages = state.messages,
-            selfId = state.currentUser?.id,
-            layout = if (state.chatLayout == "COMPACT") ChatLayout.COMPACT else ChatLayout.BUBBLES,
-            listState = listState,
-            modifier = Modifier.weight(1f),
-        )
+        Box(Modifier.weight(1f)) {
+            MessageList(
+                messages = state.messages,
+                selfId = state.currentUser?.id,
+                layout = if (state.chatLayout == "COMPACT") ChatLayout.COMPACT else ChatLayout.BUBBLES,
+                listState = listState,
+                resolver = resolver,
+                onReact = { messageId, emoji -> state.toggleReaction(messageId, emoji) },
+                onMessageLongPress = { message -> pickerTarget = message.id },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
         state.uploadProgress?.let { progress ->
             LinearProgressIndicator(
@@ -838,54 +894,233 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
         }
 
         HorizontalDivider()
-        Row(
-            Modifier.fillMaxWidth().padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                value = draft,
-                onValueChange = {
-                    draft = it
-                    // Throttled inside AppState — one mutation per 3s, not per keystroke.
-                    if (it.isNotBlank()) state.onTyping()
-                },
-                placeholder = { Text("Message  ·  Shift+Enter for a new line") },
-                modifier = Modifier
-                    .weight(1f)
-                    .focusRequester(composerFocus)
-                    // onPreviewKeyEvent, not onKeyEvent: the field must never see the Enter that
-                    // sends, or it inserts a newline first and leaves a blank line behind.
-                    .onPreviewKeyEvent { event ->
-                        val isEnter = event.key == Key.Enter || event.key == Key.NumPadEnter
-                        when {
-                            !event.isPress -> false
-                            !isEnter -> false
-                            // Shift+Enter falls through so the field inserts the newline itself.
-                            event.isShiftPressed -> false
-                            else -> {
+
+        // -- Composer --------------------------------------------------------
+
+        // The anchored autocomplete popup, drawn over the composer when an @token is active.
+        // The caret is approximated as the end of the draft — the compose text field doesn't
+        // expose caret position through onValueChange, and typing at the end is the normal case.
+        val token = activeMentionToken(draft, draft.length)
+        val candidates = if (token != null) {
+            mentionCandidates(
+                query = token.query,
+                members = state.channelMembers,
+                dmMembers = channel.members,
+                roles = state.selectedGuild?.roles ?: emptyList(),
+                isGuildChannel = isGuildChannel,
+            )
+        } else emptyList()
+
+        Box {
+            Column {
+                if (pickerTarget == "composer") {
+                    EmojiPicker(
+                        recents = recents,
+                        onPick = { emoji ->
+                            draft += emoji
+                            state.onTyping()
+                        },
+                        onClose = { pickerTarget = null },
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                            .fillMaxWidth(),
+                    )
+                }
+
+                if (pickerTarget != null && pickerTarget != "composer") {
+                    ReactionSheet(
+                        recents = recents,
+                        onPick = { emoji ->
+                            pickerTarget?.let { messageId ->
+                                state.toggleReaction(messageId, emoji)
+                            }
+                            pickerTarget = null
+                        },
+                        onDismiss = { pickerTarget = null },
+                    )
+                }
+
+                Row(
+                    Modifier.fillMaxWidth().padding(12.dp),
+                    verticalAlignment = Alignment.Bottom,
+                ) {
+                    IconButton(
+                        onClick = {
+                            pickerTarget = if (pickerTarget == "composer") null else "composer"
+                        },
+                    ) {
+                        Text("😀", fontSize = 22.sp)
+                    }
+                    Spacer(Modifier.width(4.dp))
+
+                    Column(Modifier.weight(1f)) {
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = {
+                                draft = it
+                                // Throttled inside AppState — one mutation per 3s, not per keystroke.
+                                if (it.isNotBlank()) state.onTyping()
+                            },
+                            placeholder = { Text("Message  ·  @ to mention · Shift+Enter for a new line") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(composerFocus)
+                                // onPreviewKeyEvent, not onKeyEvent: the field must never see the Enter that
+                                // sends, or it inserts a newline first and leaves a blank line behind.
+                                .onPreviewKeyEvent { event ->
+                                    val isEnter = event.key == Key.Enter || event.key == Key.NumPadEnter
+                                    when {
+                                        !event.isPress -> false
+                                        !isEnter -> false
+                                        // Enter with the autocomplete open picks the top candidate.
+                                        candidates.isNotEmpty() -> {
+                                            applyMention(draft, token!!, candidates.first()).let { (text, _) ->
+                                                draft = text
+                                            }
+                                            true
+                                        }
+                                        // Shift+Enter falls through so the field inserts the newline itself.
+                                        event.isShiftPressed -> false
+                                        else -> {
+                                            if (draft.isNotBlank()) { state.send(draft); draft = "" }
+                                            true
+                                        }
+                                    }
+                                },
+                            maxLines = 6,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = {
                                 if (draft.isNotBlank()) { state.send(draft); draft = "" }
-                                true
+                            }),
+                        )
+
+                        // The autocomplete list, anchored under the field. Shown only while a
+                        // token is active and something matches.
+                        if (candidates.isNotEmpty()) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                tonalElevation = 4.dp,
+                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                modifier = Modifier.padding(top = 4.dp).fillMaxWidth(),
+                            ) {
+                                Column {
+                                    candidates.forEach { candidate ->
+                                        Row(
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    val (text, _) = applyMention(draft, token!!, candidate)
+                                                    draft = text
+                                                }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Avatar(
+                                                when (candidate) {
+                                                    is MentionCandidate.User -> candidate.user.id
+                                                    is MentionCandidate.Role -> candidate.id
+                                                    is MentionCandidate.Special -> candidate.keyword
+                                                },
+                                                when (candidate) {
+                                                    is MentionCandidate.User -> candidate.user.label
+                                                    is MentionCandidate.Role -> candidate.label
+                                                    is MentionCandidate.Special -> "@"
+                                                },
+                                                size = 24,
+                                            )
+                                            Spacer(Modifier.width(10.dp))
+                                            Column {
+                                                Text(
+                                                    candidate.label,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                )
+                                                candidate.detail?.let { detail ->
+                                                    if (detail.isNotBlank()) {
+                                                        Text(
+                                                            detail,
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                    },
-                maxLines = 6,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = {
-                    if (draft.isNotBlank()) { state.send(draft); draft = "" }
-                }),
-            )
-            IconButton(
-                onClick = { state.attachAndSend(draft); draft = "" },
-                enabled = state.uploadProgress == null,
-            ) {
-                Icon(Icons.Filled.AttachFile, contentDescription = "Attach a file")
+                    }
+
+                    Spacer(Modifier.width(4.dp))
+                    IconButton(
+                        onClick = { state.attachAndSend(draft); draft = "" },
+                        enabled = state.uploadProgress == null,
+                    ) {
+                        Icon(Icons.Filled.AttachFile, contentDescription = "Attach a file")
+                    }
+                    IconButton(
+                        onClick = { if (draft.isNotBlank()) { state.send(draft); draft = "" } },
+                        enabled = draft.isNotBlank(),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                    }
+                }
             }
-            IconButton(
-                onClick = { state.send(draft); draft = "" },
-                enabled = draft.isNotBlank(),
-            ) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+        }
+    }
+}
+
+/**
+ * The reaction sheet: the quick one-tap set plus the full picker behind "More", shown when a
+ * message is long-pressed. Eight defaults cover nearly every reaction anyone sends; the grid
+ * is there for the other ones.
+ */
+@Composable
+private fun ReactionSheet(
+    recents: androidx.compose.runtime.MutableState<List<String>>,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    if (expanded) {
+        EmojiPicker(
+            recents = recents,
+            onPick = onPick,
+            onClose = onDismiss,
+            modifier = Modifier
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+                .fillMaxWidth(),
+        )
+        return
+    }
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        tonalElevation = 4.dp,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp).fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val font = emojiFontFamily()
+            QUICK_REACTIONS.forEach { emoji ->
+                Text(
+                    emoji,
+                    fontFamily = font,
+                    fontSize = 24.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onPick(emoji) }
+                        .padding(6.dp),
+                )
             }
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = { expanded = true }) { Text("More") }
         }
     }
 }

@@ -53,6 +53,7 @@ import androidx.compose.ui.input.key.type
  * | `Ctrl+,` | Settings |
  * | `Ctrl+D` | Devices and sign-ins |
  * | `Ctrl+S` | Stories |
+ * | `Ctrl+M` | Mentions inbox |
  * | `Ctrl+E` | Focus the message box |
  * | `Ctrl+F` | Focus the handle box (Friends) |
  * | `F1` / `Ctrl+/` | This list |
@@ -77,6 +78,7 @@ object Shortcuts {
         Entry("Ctrl+,", "Settings"),
         Entry("Ctrl+D", "Devices and sign-ins"),
         Entry("Ctrl+S", "Stories"),
+        Entry("Ctrl+M", "Mentions inbox"),
         Entry("Ctrl+E", "Focus the message box"),
         Entry("Ctrl+F", "Focus the add-by-handle box"),
         Entry("F1 or Ctrl+/", "Show this list"),
@@ -219,6 +221,7 @@ fun handleGlobalShortcut(
     onSettings: () -> Unit,
     onSessions: () -> Unit,
     onStories: () -> Unit,
+    onMentions: () -> Unit,
     onHelp: () -> Unit,
 ): Boolean {
     if (!event.isPress) return false
@@ -231,6 +234,7 @@ fun handleGlobalShortcut(
         Key.Comma -> { onSettings(); true }
         Key.D -> { onSessions(); true }
         Key.S -> { onStories(); true }
+        Key.M -> { onMentions(); true }
         Key.Slash -> { onHelp(); true }
         else -> false
     }

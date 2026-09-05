@@ -32,7 +32,10 @@ class MessageService(
     private val social: SocialRepository,
     private val mentionParser: MentionParser,
     private val mentions: MentionRepository,
+    private val reactions: ReactionRepository,
+    private val reactionEvents: ReactionEvents,
     private val guilds: app.singular.guild.GuildRepository,
+    private val guildService: app.singular.guild.GuildService,
     private val media: app.singular.media.MediaService,
     private val snowflake: Snowflake,
     private val props: SingularProperties,
@@ -214,6 +217,63 @@ class MessageService(
     }
 
     /**
+     * Adds a reaction. Permission-gated in guild channels through the same channel-scoped
+     * engine as posting — `ADD_REACTIONS` is a real flag in the bitfield, default-granted to
+     * @everyone, and a channel overwrite denying it must hold here too. DMs have no permission
+     * model; visibility (both parties being in the channel) is the whole check.
+     *
+     * The event carries the full post-change summary so slow clients re-render from a snapshot
+     * rather than applying a delta to a count they may have lost.
+     */
+    @Transactional
+    fun addReaction(messageId: Long, userId: Long, emoji: String): Message {
+        val clean = emoji.trim()
+        if (clean.isEmpty() || clean.length > REACTION_EMOJI_MAX) {
+            throw InvalidInput("Reaction must be a single emoji.")
+        }
+        val message = messages.findById(messageId, Snowflake.timestampOf(messageId))
+            ?: throw NotFound("Message")
+        val channel = channelService.requireVisible(message.channelId, userId)
+        if (channel.guildId != null) {
+            guildService.requireInChannel(
+                message.channelId, channel.guildId, userId, app.singular.guild.Permission.ADD_REACTIONS,
+            )
+        }
+        reactions.add(messageId, message.channelId, userId, clean)
+        afterCommit { reactionEvents.publish(buildUpdate(messageId, message.channelId, userId)) }
+        return message
+    }
+
+    @Transactional
+    fun removeReaction(messageId: Long, userId: Long, emoji: String): Message {
+        val message = messages.findById(messageId, Snowflake.timestampOf(messageId))
+            ?: throw NotFound("Message")
+        channelService.requireVisible(message.channelId, userId)
+        // Removing your own reaction needs no permission — a deny on ADD_REACTIONS stops you
+        // adding new ones, not withdrawing one you already left. Compare Discord.
+        reactions.remove(messageId, userId, emoji.trim())
+        afterCommit { reactionEvents.publish(buildUpdate(messageId, message.channelId, userId)) }
+        return message
+    }
+
+    fun subscribeReactions(channelId: Long, userId: Long): Flux<ReactionUpdate> {
+        channelService.requireVisible(channelId, userId)
+        return reactionEvents.subscribe(channelId)
+    }
+
+    /**
+     * The post-change snapshot for a reaction event. `me` is resolved against the actor, which
+     * is wrong for every other viewer — so subscribers ignore `me` on the wire and recompute it
+     * locally; the field is only authoritative in the mutation's own return value.
+     */
+    private fun buildUpdate(messageId: Long, channelId: Long, actorId: Long) = ReactionUpdate(
+        messageId = messageId,
+        channelId = channelId,
+        reactions = reactions.summariesFor(listOf(messageId), actorId)[messageId].orEmpty(),
+    )
+
+
+    /**
      * Every channel this user can read, merged into one stream. Backs notifications.
      *
      * Guild channels are filtered through [ChannelService.requireVisible] rather than assumed
@@ -275,5 +335,12 @@ class MessageService(
          * longer than a quarter and users who scroll straight through.
          */
         val PARTITION_LOOKBACK: java.time.Duration = java.time.Duration.ofDays(120)
+
+        /**
+         * Cap on a single reaction's stored length. A ZWJ sequence (family, profession) or a
+         * flag runs to ~7 code points / ~28 UTF-8 bytes; this ceiling admits every real emoji
+         * while rejecting a pasted paragraph masquerading as one.
+         */
+        const val REACTION_EMOJI_MAX = 64
     }
 }

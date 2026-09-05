@@ -7,14 +7,31 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import app.singular.client.net.AttachmentBriefDto
+import app.singular.client.net.AssignRoleData
 import app.singular.client.net.ChannelDto
 import app.singular.client.net.ChannelsData
+import app.singular.client.net.CreateInviteData
+import app.singular.client.net.CreateRoleData
+import app.singular.client.net.DeleteInviteData
+import app.singular.client.net.DeleteRoleData
+import app.singular.client.net.GuildMemberDto
+import app.singular.client.net.GuildMembersData
 import app.singular.client.net.GraphQlException
 import app.singular.client.net.InviteDto
 import app.singular.client.net.InvitesData
+import app.singular.client.net.KickMemberData
 import app.singular.client.net.LastMessageDto
 import app.singular.client.net.NotificationsData
+import app.singular.client.net.AddReactionData
+import app.singular.client.net.RemoveReactionData
+import app.singular.client.net.ReactionDto
+import app.singular.client.net.ReactionUpdatedData
+import app.singular.client.net.MentionInboxData
+import app.singular.client.net.SetCustomStatusData
+import app.singular.client.net.RoleDto
+import app.singular.client.net.UnassignRoleData
 import app.singular.client.net.UpdateGuildData
+import app.singular.client.net.UpdateRoleData
 import app.singular.client.net.isNewerSnowflake
 import app.singular.client.platform.showNotification
 import app.singular.client.net.LoginData
@@ -39,7 +56,6 @@ import app.singular.client.net.FinalizeUploadData
 import app.singular.client.net.SendLocationData
 import app.singular.client.net.CreateGuildChannelData
 import app.singular.client.net.CreateGuildData
-import app.singular.client.net.CreateInviteData
 import app.singular.client.net.GuildDto
 import app.singular.client.net.GuildOperations
 import app.singular.client.net.GuildsData
@@ -172,6 +188,15 @@ class AppState(
     val guildInvites = mutableStateListOf<InviteDto>()
 
     /**
+     * Members of the server whose settings are open.
+     *
+     * Not on [GuildDto] on purpose: the guild list is fetched for every server on sign-in and
+     * lives in the rail, and dragging a hundred members' full user objects through that fetch
+     * would multiply its payload for a list the settings screen is the only consumer of.
+     */
+    val guildMembers = mutableStateListOf<GuildMemberDto>()
+
+    /**
      * Newest message per channel, for the sidebar preview line.
      *
      * A map beside the channel list rather than a field mutated inside [ChannelDto], because
@@ -195,11 +220,23 @@ class AppState(
     private var refreshToken: String? = null
     private var subscription: Job? = null
     private var typingSubscription: Job? = null
+    private var reactionSubscription: Job? = null
     private var presenceSubscription: Job? = null
     private var notificationSubscription: Job? = null
     private var heartbeatJob: Job? = null
     private val typingExpiry = mutableMapOf<String, Job>()
     private var lastTypingSent = TimeSource.Monotonic.markNow() - TYPING_THROTTLE
+
+    /**
+     * Members of the guild whose channel is open, for @-autocomplete.
+     *
+     * Loaded on channel open when the channel is a guild channel. Capped at 100 by the
+     * server, which is every server this client is likely to see.
+     */
+    val channelMembers = mutableStateListOf<GuildMemberDto>()
+
+    /** The mentions inbox — messages that pinged you, newest first. */
+    val mentionInbox = mutableStateListOf<MessageDto>()
 
     val signedIn: Boolean get() = currentUser != null
 
@@ -247,6 +284,9 @@ class AppState(
         client.accessToken = access
         refreshToken = refresh
         currentUser = user
+        // Seed the live presence map with our own, so the custom status shows before the
+        // first presenceChanged event (which may be never — it only fires on change).
+        user.presence?.let { presence[it.userId] = it }
         // TODO(phase 5): persist `refresh` to the OS keystore so sign-in survives a restart.
         // Plain preferences would be a credential written to disk in the clear.
     }
@@ -315,7 +355,19 @@ class AppState(
     }
 
     /** Live status for a user, falling back to whatever came attached to their profile. */
-    fun statusOf(user: UserDto): String = presence[user.id]?.status ?: user.status
+    fun statusOf(user: UserDto): String =
+        presence[user.id]?.status ?: user.presence?.status ?: user.status
+
+    /**
+     * The custom status (emoji + text) for a user, or null — the sidebar/profile read this
+     * directly off the live map so a change lands the moment the mutation returns.
+     */
+    fun customStatusOf(userId: String): String? {
+        val p = presence[userId] ?: return null
+        return listOfNotNull(p.customEmoji, p.customText?.takeIf { it.isNotBlank() })
+            .joinToString(" ")
+            .ifEmpty { null }
+    }
 
     fun setStatus(status: String) = run {
         val p = client.execute<SetStatusData>(
@@ -553,6 +605,14 @@ class AppState(
         messages.clear()
         messages.addAll(page)
 
+        // The @-autocomplete source: guild channels need the server's member list; DMs already
+        // carry theirs on the channel. Loaded after the messages so a slow members fetch can
+        // never delay the conversation appearing.
+        channelMembers.clear()
+        selectedGuild?.let { guild ->
+            if (guild.channels.any { it.id == channel.id }) loadChannelMembers(guild.id)
+        }
+
         watch(channel.id)
     }
 
@@ -638,8 +698,10 @@ class AppState(
     fun closeChannel() {
         selectedChannel = null
         messages.clear()
+        channelMembers.clear()
         subscription?.cancel()
         typingSubscription?.cancel()
+        reactionSubscription?.cancel()
         clearTyping()
     }
 
@@ -692,6 +754,7 @@ class AppState(
     private fun watch(channelId: String) {
         clearTyping()
         watchTyping(channelId)
+        watchReactions(channelId)
         subscription?.cancel()
         subscription = scope.launch {
             var backoff = 1_000L
@@ -713,6 +776,151 @@ class AppState(
                 delay(backoff)
                 backoff = (backoff * 2).coerceAtMost(30_000L)
             }
+        }
+    }
+
+    /**
+     * Live reaction snapshots for the open channel.
+     *
+     * The wire `me` flag reflects the actor, not this viewer, so it is ignored on arrival:
+     * only the emoji+count are taken from the event, and the viewer's own reacted-state is
+     * recomputed by merging the snapshot into the local message. An optimistic toggle that's
+     * still in flight will be corrected by the next snapshot for it.
+     */
+    private fun watchReactions(channelId: String) {
+        reactionSubscription?.cancel()
+        reactionSubscription = scope.launch {
+            var backoff = 1_000L
+            while (true) {
+                try {
+                    client.subscribe(
+                        Operations.REACTION_UPDATED,
+                        buildJsonObject { put("channelId", channelId) },
+                    ).collect { data ->
+                        backoff = 1_000L
+                        val update = SingularClient.codec
+                            .decodeFromJsonElement(ReactionUpdatedData.serializer(), data).update
+                        if (update.channelId == selectedChannel?.id) applyReactionUpdate(update)
+                    }
+                } catch (_: Exception) {
+                    // Same policy as typing: a stale chip is not worth a banner.
+                }
+                delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(30_000L)
+            }
+        }
+    }
+
+    /**
+     * Merges a reaction snapshot into the open channel's message list.
+     *
+     * `me` is dropped from the wire data (see [watchReactions]); if this viewer reacted, the
+     * optimistic toggle already flipped their flag and any drift is corrected by the snapshot's
+     * count. If another user reacted, the chip appears/updates.
+     */
+    private fun applyReactionUpdate(update: ReactionUpdateDto) {
+        val index = messages.indexOfFirst { it.id == update.messageId }
+        if (index == -1) return
+        val message = messages[index]
+        val mine = message.reactions.filter { it.me }.map { it.emoji }.toSet()
+        messages[index] = message.copy(
+            reactions = update.reactions.map { it.copy(me = it.emoji in mine) }
+        )
+    }
+
+    /**
+     * Toggles the viewer's reaction on a message, optimistically.
+     *
+     * The action is decided BEFORE the optimistic flip — reading "did I react" after the flip
+     * would always see the post-change answer and invert the mutation. Optimistic-first
+     * because a reaction must feel instant; the subscription echo corrects any drift.
+     */
+    fun toggleReaction(messageId: String, emoji: String) {
+        val index = messages.indexOfFirst { it.id == messageId }
+        if (index == -1) return
+
+        val message = messages[index]
+        val existing = message.reactions.firstOrNull { it.emoji == emoji }
+        val shouldAdd = existing == null || !existing.me
+
+        messages[index] = if (shouldAdd) {
+            if (existing == null) {
+                message.copy(reactions = message.reactions + ReactionDto(emoji, 1, true))
+            } else {
+                message.copy(
+                    reactions = message.reactions.map {
+                        if (it.emoji == emoji) it.copy(count = it.count + 1, me = true) else it
+                    }
+                )
+            }
+        } else {
+            message.copy(
+                reactions = message.reactions
+                    .map { if (it.emoji == emoji) it.copy(count = it.count - 1, me = false) else it }
+                    .filter { it.count > 0 }
+            )
+        }
+
+        scope.launch {
+            try {
+                if (shouldAdd) {
+                    client.execute<AddReactionData>(
+                        Operations.ADD_REACTION,
+                        buildJsonObject { put("messageId", messageId); put("emoji", emoji) },
+                    )
+                } else {
+                    client.execute<RemoveReactionData>(
+                        Operations.REMOVE_REACTION,
+                        buildJsonObject { put("messageId", messageId); put("emoji", emoji) },
+                    )
+                }
+            } catch (e: Exception) {
+                error = describe(e)
+            }
+        }
+    }
+
+    /** Loads the mentions inbox. */
+    fun loadMentionInbox() = run {
+        val loaded = client.execute<MentionInboxData>(
+            Operations.MENTION_INBOX,
+            buildJsonObject { put("limit", 50) },
+        ).messages
+        mentionInbox.clear()
+        mentionInbox.addAll(loaded)
+    }
+
+    /**
+     * Sets an emoji + text custom status (feature 4's half-built corner: the server field and
+     * plumbing existed, the UI never surfaced it).
+     */
+    fun setCustomStatus(emoji: String?, text: String?) = run {
+        val updated = client.execute<SetCustomStatusData>(
+            Operations.SET_CUSTOM_STATUS,
+            buildJsonObject {
+                put("text", text)
+                put("emoji", emoji)
+            },
+        ).presence
+        presence[updated.userId] = updated
+        currentUser = currentUser?.copy(presence = updated)
+    }
+
+    /**
+     * Loads the member list for the guild whose channel is open — the autocomplete source.
+     *
+     * Only called for guild channels; DMs use the channel's own member list.
+     */
+    private fun loadChannelMembers(guildId: String) {
+        try {
+            val loaded = client.execute<GuildMembersData>(
+                GuildOperations.GUILD_MEMBERS,
+                buildJsonObject { put("guildId", guildId) },
+            ).guildMembers
+            channelMembers.clear()
+            channelMembers.addAll(loaded)
+        } catch (_: Exception) {
+            // Autocomplete falls back to empty — better than blocking the chat on it.
         }
     }
 
@@ -943,8 +1151,10 @@ class AppState(
         selectedGuild = guild
         selectedChannel = null
         messages.clear()
+        channelMembers.clear()
         subscription?.cancel()
         typingSubscription?.cancel()
+        reactionSubscription?.cancel()
         clearTyping()
     }
 
@@ -1074,15 +1284,117 @@ class AppState(
         selectedGuild = guilds.firstOrNull { it.id == guild.id }
     }
 
-    fun setNickname(guildId: String, nickname: String?) = run {
+    fun setNickname(guildId: String, userId: String? = null, nickname: String?) = run {
         client.postRaw(
             GuildOperations.SET_NICKNAME,
             buildJsonObject {
                 put("guildId", guildId)
+                userId?.let { put("userId", it) }
                 nickname?.let { put("nickname", it) }
             },
         )
         loadGuilds()
+        // The member list shows the old nickname until the next visit otherwise. Guild data
+        // alone isn't enough: `me` only carries your own.
+        if (userId != null) loadGuildMembers(guildId)
+    }
+
+    /**
+     * The server's members, for the settings screen's Members section.
+     *
+     * Capped at 100 by the server; enough for every server this client is likely to see, and
+     * the alternative is pagination UI for a list whose 101st entry nobody has met yet.
+     */
+    fun loadGuildMembers(guildId: String) = run {
+        val loaded = client.execute<GuildMembersData>(
+            GuildOperations.GUILD_MEMBERS,
+            buildJsonObject { put("guildId", guildId) },
+        ).guildMembers
+        guildMembers.clear()
+        guildMembers.addAll(loaded)
+    }
+
+    fun kickMember(guildId: String, userId: String) = run {
+        client.execute<KickMemberData>(
+            GuildOperations.KICK_MEMBER,
+            buildJsonObject {
+                put("guildId", guildId)
+                put("userId", userId)
+            },
+        )
+        loadGuildMembers(guildId)
+    }
+
+    fun createRole(guildId: String, name: String, color: Int? = null) = run {
+        client.execute<CreateRoleData>(
+            GuildOperations.CREATE_ROLE,
+            buildJsonObject {
+                put("guildId", guildId)
+                put("name", name)
+                color?.let { put("color", it) }
+            },
+        )
+        loadGuilds()
+    }
+
+    fun updateRole(
+        roleId: String,
+        name: String? = null,
+        color: Int? = null,
+        hoist: Boolean? = null,
+        mentionable: Boolean? = null,
+    ) = run {
+        client.execute<UpdateRoleData>(
+            GuildOperations.UPDATE_ROLE,
+            buildJsonObject {
+                put("roleId", roleId)
+                name?.let { put("name", it) }
+                color?.let { put("color", it) }
+                hoist?.let { put("hoist", it) }
+                mentionable?.let { put("mentionable", it) }
+            },
+        )
+        loadGuilds()
+    }
+
+    fun deleteRole(roleId: String) = run {
+        client.execute<DeleteRoleData>(
+            GuildOperations.DELETE_ROLE,
+            buildJsonObject { put("roleId", roleId) },
+        )
+        loadGuilds()
+    }
+
+    /** Assign or remove a role from a member, in one function because the UI is one toggle. */
+    fun setMemberRole(guildId: String, userId: String, roleId: String, assigned: Boolean) = run {
+        if (assigned) {
+            client.execute<AssignRoleData>(
+                GuildOperations.ASSIGN_ROLE,
+                buildJsonObject {
+                    put("guildId", guildId)
+                    put("userId", userId)
+                    put("roleId", roleId)
+                },
+            )
+        } else {
+            client.execute<UnassignRoleData>(
+                GuildOperations.UNASSIGN_ROLE,
+                buildJsonObject {
+                    put("guildId", guildId)
+                    put("userId", userId)
+                    put("roleId", roleId)
+                },
+            )
+        }
+        loadGuildMembers(guildId)
+    }
+
+    fun deleteInvite(code: String) = run {
+        client.execute<DeleteInviteData>(
+            GuildOperations.DELETE_INVITE,
+            buildJsonObject { put("code", code) },
+        )
+        guildInvites.removeAll { it.code == code }
     }
 
     fun leaveGuild(guildId: String) = run {

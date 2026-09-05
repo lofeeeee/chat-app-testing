@@ -145,6 +145,28 @@ data class MessageDto(
     val authorBlocked: Boolean = false,
     val attachments: List<AttachmentDto> = emptyList(),
     val location: LocationDto? = null,
+    val mentions: List<MentionDto> = emptyList(),
+    val reactions: List<ReactionDto> = emptyList(),
+)
+
+@Serializable
+data class MentionDto(
+    val type: String,
+    val targetId: String? = null,
+)
+
+@Serializable
+data class ReactionDto(
+    val emoji: String,
+    val count: Int,
+    val me: Boolean = false,
+)
+
+@Serializable
+data class ReactionUpdateDto(
+    val messageId: String,
+    val channelId: String,
+    val reactions: List<ReactionDto> = emptyList(),
 )
 
 @Serializable
@@ -253,6 +275,11 @@ data class GraphQlResponse<T>(
 @Serializable data class UserByHandleData(val userByHandle: UserDto? = null)
 @Serializable data class MessageCreatedData(@SerialName("messageCreated") val message: MessageDto)
 @Serializable data class NotificationsData(@SerialName("notifications") val message: MessageDto)
+@Serializable data class AddReactionData(@SerialName("addReaction") val message: MessageDto)
+@Serializable data class RemoveReactionData(@SerialName("removeReaction") val message: MessageDto)
+@Serializable data class ReactionUpdatedData(@SerialName("reactionUpdated") val update: ReactionUpdateDto)
+@Serializable data class MentionInboxData(@SerialName("mentionInbox") val messages: List<MessageDto>)
+@Serializable data class SetCustomStatusData(@SerialName("setCustomStatus") val presence: PresenceDto)
 
 // -- Session management ------------------------------------------------------
 
@@ -411,3 +438,11 @@ data class InviteDto(
 @Serializable data class CreateInviteData(@SerialName("createInvite") val invite: InviteDto)
 @Serializable data class GuildMembersData(val guildMembers: List<GuildMemberDto>)
 @Serializable data class CreateGuildChannelData(@SerialName("createGuildChannel") val channel: ChannelDto)
+
+@Serializable data class CreateRoleData(@SerialName("createRole") val role: RoleDto)
+@Serializable data class UpdateRoleData(@SerialName("updateRole") val role: RoleDto)
+@Serializable data class DeleteRoleData(@SerialName("deleteRole") val ok: Boolean)
+@Serializable data class AssignRoleData(@SerialName("assignRole") val ok: Boolean)
+@Serializable data class UnassignRoleData(@SerialName("unassignRole") val ok: Boolean)
+@Serializable data class KickMemberData(@SerialName("kickMember") val ok: Boolean)
+@Serializable data class DeleteInviteData(@SerialName("deleteInvite") val ok: Boolean)

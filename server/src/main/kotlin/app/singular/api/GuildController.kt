@@ -88,7 +88,12 @@ class GuildController(
 
     @QueryMapping
     fun invites(@Argument guildId: Long, ctx: GraphQLContext): List<Invite> {
-        service.require(guildId, ctx.requirePrincipal().userId, Permission.MANAGE_INVITES)
+        // CREATE_INVITE, not MANAGE_INVITES: the default @everyone role holds the former, and
+        // the settings screen lists codes the moment it opens. Requiring MANAGE_INVITES here
+        // made that first load a 403 for every ordinary member who could mint a code but not
+        // audit one — reading the codes you can create is not the privilege the stricter flag
+        // was protecting. Revoking a code still takes MANAGE_INVITES, in deleteInvite.
+        service.require(guildId, ctx.requirePrincipal().userId, Permission.CREATE_INVITE)
         return guilds.invitesFor(guildId)
     }
 

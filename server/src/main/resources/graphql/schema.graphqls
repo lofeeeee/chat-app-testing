@@ -81,6 +81,22 @@ type Message {
   authorBlocked: Boolean!
   "Parsed from the body at send time — drives notification fanout and the mentions inbox."
   mentions: [Mention!]!
+  "Aggregated reaction chips, `me` resolved against the requesting viewer."
+  reactions: [Reaction!]!
+}
+
+"A reaction aggregate for one emoji on a message: how many, and whether the viewer reacted."
+type Reaction {
+  emoji: String!
+  count: Int!
+  me: Boolean!
+}
+
+"Post-change reaction snapshot for a message. `me` reflects the actor, not the subscriber."
+type ReactionUpdate {
+  messageId: Snowflake!
+  channelId: Snowflake!
+  reactions: [Reaction!]!
 }
 
 "Backwards cursor pagination: pass the oldest id you hold as `before`."
@@ -162,6 +178,9 @@ type Mutation {
   user is actually typing, not on every keystroke.
   """
   startTyping(channelId: Snowflake!): Boolean!
+  "Idempotent per (message, you, emoji) — re-adding the same emoji is a no-op."
+  addReaction(messageId: Snowflake!, emoji: String!): Message!
+  removeReaction(messageId: Snowflake!, emoji: String!): Message!
 }
 
 """
@@ -190,6 +209,8 @@ type Subscription {
   when its channel list changes.
   """
   notifications: Message!
+  "Live reaction snapshots for a channel. Recompute your own reacted-state locally."
+  reactionUpdated(channelId: Snowflake!): ReactionUpdate!
 }
 
 # ---------------------------------------------------------------------------

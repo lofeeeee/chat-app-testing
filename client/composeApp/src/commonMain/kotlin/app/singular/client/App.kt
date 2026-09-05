@@ -23,6 +23,9 @@ import app.singular.client.ui.isPress
 import coil3.SingletonImageLoader
 import coil3.compose.LocalPlatformContext
 import app.singular.client.ui.LoginScreen
+import app.singular.client.ui.MentionsScreen
+import app.singular.client.ui.ServerSettingsScreen
+import app.singular.client.ui.ServerSettingsSection
 import app.singular.client.ui.SessionsScreen
 import app.singular.client.ui.SettingsScreen
 import app.singular.client.ui.StoriesScreen
@@ -53,7 +56,19 @@ fun App(
     var showSessions by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showStories by remember { mutableStateOf(false) }
+    var showMentions by remember { mutableStateOf(false) }
     var showShortcuts by remember { mutableStateOf(false) }
+
+    /**
+     * Server settings, if open: which server, and which section it opened on.
+     *
+     * The guild is resolved from `state.guilds` at render time rather than captured here —
+     * `loadGuilds()` replaces every GuildDto after each settings save, and a captured one would
+     * freeze the screen on pre-save data. Storing the id and looking it up means a rename in
+     * Overview is on screen the moment it's saved.
+     */
+    var serverSettingsGuildId by remember { mutableStateOf<String?>(null) }
+    var serverSettingsSection by remember { mutableStateOf(ServerSettingsSection.OVERVIEW) }
 
     /**
      * What "back" means, in one place.
@@ -70,7 +85,9 @@ fun App(
             showShortcuts -> { showShortcuts = false; true }
             showSettings -> { showSettings = false; true }
             showStories -> { showStories = false; true }
+            showMentions -> { showMentions = false; true }
             showSessions -> { showSessions = false; true }
+            serverSettingsGuildId != null -> { serverSettingsGuildId = null; true }
             else -> false   // ChatScreen handles its own layer: closing the conversation
         }
     }
@@ -80,6 +97,18 @@ fun App(
         showSettings = target == "settings"
         showStories = target == "stories"
         showSessions = target == "sessions"
+        showMentions = target == "mentions"
+        // Server settings is not a Ctrl-chord destination, but opening one of those from
+        // inside it should still leave it behind — same rule as the screens above.
+        if (target != null) serverSettingsGuildId = null
+    }
+
+    /** Server settings is opened for *this* selected server, straight at the section asked for. */
+    fun openServerSettings(section: ServerSettingsSection) {
+        val guild = state.selectedGuild ?: return
+        go(null)
+        serverSettingsSection = section
+        serverSettingsGuildId = guild.id
     }
 
     DisposableEffect(client) { onDispose { client.close() } }
@@ -123,7 +152,7 @@ fun App(
             KeyboardScope(
                 // Which screen is showing. Changing it re-takes keyboard focus, so Escape
                 // keeps working after navigating to a screen that has nothing focusable on it.
-                refocusKey = listOf(showSettings, showStories, showSessions),
+                refocusKey = listOf(showSettings, showStories, showMentions, showSessions, serverSettingsGuildId),
                 onPreviewKey = { event ->
                     when {
                         event.isPress && event.key == Key.Escape -> goBack()
@@ -132,21 +161,37 @@ fun App(
                             onSettings = { go(if (showSettings) null else "settings") },
                             onSessions = { go(if (showSessions) null else "sessions") },
                             onStories = { go(if (showStories) null else "stories") },
+                            onMentions = { go(if (showMentions) null else "mentions") },
                             onHelp = { showShortcuts = !showShortcuts },
                         ) -> true
                         else -> false
                     }
                 }
             ) {
+                // Resolved per composition: `loadGuilds()` replaces the DTOs, so holding one
+                // would show stale data after the first save. A guild that vanished from the
+                // list — left, kicked — falls through to the chat, which is where you are.
+                val serverSettingsGuild = serverSettingsGuildId
+                    ?.let { id -> state.guilds.firstOrNull { it.id == id } }
+
                 when {
                     showSettings -> SettingsScreen(state) { showSettings = false }
                     showStories -> StoriesScreen(state) { showStories = false }
+                    showMentions -> MentionsScreen(state) { showMentions = false }
                     showSessions -> SessionsScreen(sessions) { showSessions = false }
+                    serverSettingsGuild != null -> ServerSettingsScreen(
+                        state = state,
+                        guild = serverSettingsGuild,
+                        initialSection = serverSettingsSection,
+                        onClose = { serverSettingsGuildId = null },
+                    )
                     else -> ChatScreen(
                         state,
                         onOpenSessions = { go("sessions") },
                         onOpenSettings = { go("settings") },
                         onOpenStories = { go("stories") },
+                        onOpenMentions = { go("mentions") },
+                        onOpenServerSettings = ::openServerSettings,
                     )
                 }
             }
