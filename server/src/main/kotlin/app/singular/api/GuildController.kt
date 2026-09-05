@@ -22,6 +22,7 @@ import app.singular.guild.Permission
 import app.singular.guild.PermissionEngine
 import app.singular.guild.Permissions
 import app.singular.guild.Role
+import app.singular.media.AttachmentStatus
 import app.singular.security.requirePrincipal
 import app.singular.user.UserRepository
 import graphql.GraphQLContext
@@ -52,6 +53,8 @@ class GuildController(
     private val folders: FolderRepository,
     private val engine: PermissionEngine,
     private val users: UserRepository,
+    private val attachments: app.singular.media.AttachmentRepository,
+    private val media: app.singular.media.MediaService,
     private val snowflake: Snowflake,
     private val audit: AuditLog,
 ) {
@@ -355,6 +358,23 @@ class GuildController(
 
     @SchemaMapping(typeName = "Guild", field = "channels")
     fun guildChannels(v: GuildView): List<Channel> = channels.channelsInGuild(v.guild.id)
+
+    /**
+     * A signed URL for the server icon.
+     *
+     * `iconKey` holds an attachment id rather than a raw object key, so that an icon goes
+     * through the same upload pipeline as everything else a user's disk produces — EXIF
+     * stripped, thumbnailed, size-checked. The indirection is what makes that reuse possible.
+     *
+     * Returns null for an icon that is missing or still uploading rather than a broken link.
+     */
+    @SchemaMapping(typeName = "Guild", field = "iconUrl")
+    fun guildIconUrl(v: GuildView): String? {
+        val attachmentId = v.guild.iconKey?.toLongOrNull() ?: return null
+        val attachment = attachments.find(attachmentId) ?: return null
+        if (attachment.status != AttachmentStatus.READY) return null
+        return media.downloadUrl(attachment.thumbnailKey ?: attachment.objectKey)
+    }
 
     @SchemaMapping(typeName = "Guild", field = "roles")
     fun guildRoles(v: GuildView): List<Role> = guilds.rolesOf(v.guild.id)

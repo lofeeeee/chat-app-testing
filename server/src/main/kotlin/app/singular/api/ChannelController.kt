@@ -3,7 +3,9 @@ package app.singular.api
 import app.singular.channel.ChannelRepository
 import app.singular.channel.ChannelService
 import app.singular.domain.Channel
+import app.singular.domain.Message
 import app.singular.domain.User
+import app.singular.message.MessageRepository
 import app.singular.security.requirePrincipal
 import app.singular.user.UserRepository
 import graphql.GraphQLContext
@@ -18,6 +20,7 @@ class ChannelController(
     private val channelService: ChannelService,
     private val channels: ChannelRepository,
     private val users: UserRepository,
+    private val messages: MessageRepository,
 ) {
 
     @QueryMapping
@@ -53,5 +56,26 @@ class ChannelController(
         return channels.associateWith { channel ->
             idsByChannel[channel.id].orEmpty().mapNotNull { allUsers[it] }
         }
+    }
+
+    /**
+     * The newest message in each channel, for the sidebar preview.
+     *
+     * Batched for the same reason as `members`: a sidebar of N conversations must not cost N
+     * message lookups. `last_message_id` is already denormalised onto the row by the send
+     * path, so this is one keyed fetch rather than N "newest row per channel" scans.
+     *
+     * Absent for a channel whose last message was deleted — the preview then falls back to
+     * nothing rather than showing a message that isn't there any more.
+     */
+    @BatchMapping(typeName = "Channel", field = "lastMessage")
+    fun lastMessages(channels: List<Channel>): Map<Channel, Message> {
+        val loaded = messages.findAllById(channels.mapNotNull { it.lastMessageId }.toSet())
+        // Channels with nothing to show are left out of the map entirely rather than mapped
+        // to null: an absent key is how a batch mapping says "null", and null *values* are
+        // not something every map the loader passes through will tolerate.
+        return channels.mapNotNull { channel ->
+            channel.lastMessageId?.let(loaded::get)?.let { channel to it }
+        }.toMap()
     }
 }

@@ -1,7 +1,10 @@
 package app.singular.client.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.decodeToImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import coil3.ImageLoader
 import coil3.PlatformContext
@@ -41,6 +44,38 @@ fun buildImageLoader(context: PlatformContext): ImageLoader =
  * miss the cache on every render and re-download constantly. [stableKey] is the attachment's
  * snowflake, which never changes.
  */
+/**
+ * Draws bytes the user just picked, before anything has been uploaded.
+ *
+ * Decoded directly rather than handed to Coil. Coil's job is fetching and caching things that
+ * live somewhere else; a byte array already in memory needs neither, and routing it through a
+ * loader would mean inventing a cache key for something that exists for the length of one
+ * editing session.
+ *
+ * The decode is remembered on the array itself, so scrubbing a size slider re-lays-out the
+ * preview without re-decoding a photo on every frame.
+ *
+ * Returns nothing drawable if the bytes aren't a supported image — a file that arrived with a
+ * misleading extension should leave an empty frame, not take the editor down.
+ */
+@Composable
+fun LocalImage(
+    bytes: ByteArray,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Crop,
+) {
+    val bitmap = remember(bytes) { runCatching { bytes.decodeToImageBitmap() }.getOrNull() }
+        ?: return
+
+    Image(
+        bitmap = bitmap,
+        contentDescription = contentDescription,
+        modifier = modifier,
+        contentScale = contentScale,
+    )
+}
+
 @Composable
 fun RemoteImage(
     url: String,

@@ -32,6 +32,7 @@ class MessageService(
     private val social: SocialRepository,
     private val mentionParser: MentionParser,
     private val mentions: MentionRepository,
+    private val guilds: app.singular.guild.GuildRepository,
     private val media: app.singular.media.MediaService,
     private val snowflake: Snowflake,
     private val props: SingularProperties,
@@ -210,6 +211,33 @@ class MessageService(
         // phase 2 by closing the socket on the leave event, not by re-checking per message.
         channelService.requireVisible(channelId, userId)
         return events.subscribe(channelId)
+    }
+
+    /**
+     * Every channel this user can read, merged into one stream. Backs notifications.
+     *
+     * Guild channels are filtered through [ChannelService.requireVisible] rather than assumed
+     * readable from membership alone: a server you are in can perfectly well contain channels
+     * a role overwrite hides from you, and those must not leak through a notification either.
+     *
+     * Skips your own messages — see the note on the resolver.
+     */
+    fun subscribeAll(userId: Long): Flux<Message> {
+        val direct = channels.listForUser(userId).map { it.id }
+        val guild = guilds.guildsForUser(userId)
+            .flatMap { channels.channelsInGuild(it.id) }
+            .filter { runCatching { channelService.requireVisible(it.id, userId) }.isSuccess }
+            .map { it.id }
+
+        val ids = (direct + guild).distinct()
+        if (ids.isEmpty()) return Flux.empty()
+
+        // Concurrency is passed explicitly. `Flux.merge`'s default caps at 32 inner sources
+        // and subscribes to the rest only as earlier ones complete — but these never
+        // complete, so anyone in more than 32 channels would silently never be notified
+        // about the 33rd onwards.
+        return Flux.merge(Flux.fromIterable(ids.map(events::subscribe)), ids.size)
+            .filter { it.authorId != userId }
     }
 
     /**

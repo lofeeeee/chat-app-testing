@@ -50,23 +50,72 @@ See [Feature status](#feature-status) below for what's done vs. in progress.
 
 ```
 singular/
-├── server/          Kotlin + Spring Boot + Spring for GraphQL.  Builds with just a JDK.
-├── client/          Kotlin Multiplatform + Compose.  Desktop needs a JDK; Android needs the SDK.
+├── server/              Kotlin + Spring Boot + Spring for GraphQL      -> server/README.md
+├── client/              Kotlin Multiplatform + Compose                 -> client/README.md
+├── scripts/             End-to-end checks against a live server        -> scripts/README.md
 ├── docker-compose.yml   Postgres 17, Valkey, MinIO
-└── docs/            Design notes
+├── start.bat            Starts services + server + one client window
+├── start_another.bat    Opens a second client (for testing two accounts)
+├── build.bat            Incremental build of both projects
+├── rebuild.bat          Clean rebuild
+└── _env.bat             Shared JDK discovery. Not run directly.
 ```
+
+**Each folder has its own README** covering the decisions specific to it:
+
+| | |
+|---|---|
+| [`server/README.md`](server/README.md) | Package map, the permission engine, hash-vs-encrypt, why Valkey is mandatory, migrations |
+| [`client/README.md`](client/README.md) | Compose state rules, the two chat layouts, image caching, platform `expect`/`actual` pieces |
+| [`scripts/README.md`](scripts/README.md) | What the E2E suites assert, and the bugs they caught |
+
+The two Gradle builds are deliberately independent: a missing Android SDK must never be able to
+block the backend.
 
 ## Running it
 
-### 1. Backing services
+### The short way (Windows)
+
+```
+start.bat
+```
+
+Brings up the three containers, waits for each to answer, launches the server, waits for it to
+be healthy, then opens a client window. `start_another.bat` opens a second client against the
+same server — handy for watching messages cross between two accounts.
+
+### The long way
+
+#### 1. Backing services
 
 ```bash
 docker compose up -d
 ```
 
-Postgres on `5432`, Valkey on `6379`, MinIO on `9000` (console `9001`, `singular` / `singular-dev-only`).
+| Service | Host port | Why not the default |
+|---|---|---|
+| Postgres | `5432` | — |
+| Valkey | **`6380`** | 6379 is very often already taken |
+| MinIO | **`9100`** (console `9101`) | 9000 likewise |
 
-### 2. Server
+Those non-standard ports are deliberate. **A Docker port clash does not fail loudly**: the
+container starts *without publishing*, your app connects to whatever else is on that port, and
+you get authentication errors that look like bad credentials rather than a wrong server. That
+happened during development — the server spent an hour talking to a different project's MinIO.
+
+**All three are required.** The server refuses to boot without Valkey:
+
+```
+Cannot reach Valkey at redis://localhost:6380 — is the container up?
+```
+
+That is on purpose. Valkey carries cross-node fanout, presence, rate limiting and the
+scheduled-job lock; silently degrading to single-node behaviour in a multi-node deployment
+split-brains, with messages reaching only half the users. Failing at boot beats failing under
+load. MinIO is the opposite call — it logs a warning and boots anyway, because most requests
+never touch it.
+
+#### 2. Server
 
 ```bash
 cd server
@@ -77,9 +126,9 @@ cd server
 - WebSocket (subscriptions): `ws://localhost:8080/graphql`
 - GraphiQL (dev only): `http://localhost:8080/graphiql`
 
-Flyway applies `V1__baseline.sql` on boot and creates monthly partitions through 2027.
+Flyway applies all five migrations on boot and creates monthly partitions through 2027.
 
-### 3. Desktop client
+#### 3. Desktop client
 
 ```bash
 cd client
@@ -94,7 +143,7 @@ reappears with no build-file edit.
 
 Gradle wrappers are checked in; both projects build with a JDK 21 and nothing else.
 
-### Try it without the client
+#### Try it without the client
 
 ```bash
 curl -s localhost:8080/graphql -H 'content-type: application/json' -d '{

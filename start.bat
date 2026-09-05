@@ -23,13 +23,18 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo   [1/3] database and object storage
-docker compose -f "%PROJECT_ROOT%\docker-compose.yml" up -d postgres minio >nul 2>&1
+REM All three, not just postgres. The server refuses to start without Valkey -- it drives
+REM cross-node fanout, and silently degrading to single-node would split-brain a real
+REM deployment. Bringing up two of the three services just moves the failure later.
+echo   [1/3] database, cache and object storage
+docker compose -f "%PROJECT_ROOT%\docker-compose.yml" up -d postgres valkey minio >nul 2>&1
 if errorlevel 1 (
-  echo         compose failed, starting the container directly...
+  echo         compose failed, starting containers directly...
   docker start singular-db >nul 2>&1 || docker run -d --name singular-db ^
     -e POSTGRES_DB=singular -e POSTGRES_USER=singular -e POSTGRES_PASSWORD=singular-dev-only ^
     -p 5432:5432 postgres:17-alpine >nul 2>&1
+  docker start singular-cache >nul 2>&1 || docker run -d --name singular-cache ^
+    -p 6380:6379 valkey/valkey:8-alpine valkey-server --save "" --appendonly no >nul 2>&1
 )
 
 set /a _tries=0
@@ -44,7 +49,20 @@ if %_tries% geq 60 (
 ping -n 2 127.0.0.1 >nul
 goto waitdb
 :dbready
-echo         postgres on 5432, minio on 9100 (console 9101)
+
+set /a _tries=0
+:waitcache
+docker exec singular-cache valkey-cli ping >nul 2>&1
+if not errorlevel 1 goto cacheready
+set /a _tries+=1
+if %_tries% geq 40 (
+  echo         valkey never became ready. Try: docker logs singular-cache
+  exit /b 1
+)
+ping -n 2 127.0.0.1 >nul
+goto waitcache
+:cacheready
+echo         postgres 5432, valkey 6380, minio 9100 (console 9101)
 
 REM --- 2. server --------------------------------------------------------------
 set "SERVER_JAR="
@@ -95,6 +113,6 @@ echo     sign in    nova@singular.test  /  singular-demo
 echo                orbit@singular.test /  singular-demo
 echo.
 echo     second window   start_another.bat
-echo     stop database   docker stop singular-db
+echo     stop services   docker compose down
 echo.
 endlocal

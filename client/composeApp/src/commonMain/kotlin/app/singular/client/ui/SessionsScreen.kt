@@ -9,12 +9,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -27,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.singular.client.SessionState
@@ -41,6 +46,7 @@ import app.singular.client.net.DeviceSessionDto
 @Composable
 fun SessionsScreen(sessions: SessionState, onClose: () -> Unit) {
     var scanned by remember { mutableStateOf("") }
+    val focus = LocalFocusManager.current
 
     LaunchedEffect(Unit) { sessions.load() }
 
@@ -56,8 +62,16 @@ fun SessionsScreen(sessions: SessionState, onClose: () -> Unit) {
 
     Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onClose) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+            Spacer(Modifier.width(6.dp))
             Text("Devices", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            TextButton(onClick = onClose) { Text("Done") }
+            Text(
+                "Esc to go back",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         Card {
@@ -74,7 +88,10 @@ fun SessionsScreen(sessions: SessionState, onClose: () -> Unit) {
                         onValueChange = { scanned = it },
                         label = { Text("Scanned code") },
                         singleLine = true,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).formField(
+                            focus,
+                            enabled = scanned.isNotBlank() && !sessions.busy,
+                        ) { sessions.claim(scanned.trim()); scanned = "" },
                     )
                     Spacer(Modifier.width(10.dp))
                     Button(
@@ -175,19 +192,25 @@ private fun ApprovalDialog(
         onDismissRequest = onDeny,
         title = { Text("Sign in on ${platform ?: "another device"}?") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    "This will give that device full access to your account.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                DetailLine("Device", platform ?: "Unknown")
-                DetailLine("Address", ipAddress ?: "Unknown")
-                userAgent?.let { DetailLine("Client", it.take(64)) }
-                Text(
-                    "If you didn't just start a sign-in on that device, deny this.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+            // Escape denies, and Enter is deliberately *not* bound to approve. Granting full
+            // account access is the one decision in this app that has to be a deliberate
+            // click — a stray Enter from the field behind this dialog must never approve a
+            // sign-in someone else started.
+            DialogKeys(onDismiss = onDeny) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "This will give that device full access to your account.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    DetailLine("Device", platform ?: "Unknown")
+                    DetailLine("Address", ipAddress ?: "Unknown")
+                    userAgent?.let { DetailLine("Client", it.take(64)) }
+                    Text(
+                        "If you didn't just start a sign-in on that device, deny this.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         },
         confirmButton = { Button(onClick = onApprove) { Text("Approve") } },

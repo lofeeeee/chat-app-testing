@@ -83,6 +83,26 @@ class MessageController(
     fun messageCreated(@Argument channelId: Long, ctx: GraphQLContext): Flux<Message> =
         messageService.subscribe(channelId, ctx.requirePrincipal().userId)
 
+    /**
+     * Everything addressed to you, across every channel — what desktop notifications listen on.
+     *
+     * `messageCreated` is per-channel and therefore only ever covers the conversation you have
+     * open, which is precisely the one you do *not* need to be told about. This merges the
+     * fanout for every channel you can currently read into one stream, so a client needs one
+     * socket rather than one per conversation.
+     *
+     * Your own messages are filtered out here rather than in each client: a notification for
+     * something you just typed is never wanted, and leaving it to clients means whichever one
+     * forgets is the one that annoys you.
+     *
+     * Membership is resolved **once, at subscribe time**. A channel created after you
+     * subscribed is not in the stream — the client reopens this subscription when its channel
+     * list changes, which is the same moment it would need the new channel anyway.
+     */
+    @SubscriptionMapping
+    fun notifications(ctx: GraphQLContext): Flux<Message> =
+        messageService.subscribeAll(ctx.requirePrincipal().userId)
+
     @MutationMapping
     fun startTyping(@Argument channelId: Long, ctx: GraphQLContext): Boolean {
         val principal = ctx.requirePrincipal()

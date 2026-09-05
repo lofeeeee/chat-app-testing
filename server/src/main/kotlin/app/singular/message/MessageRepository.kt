@@ -1,5 +1,6 @@
 package app.singular.message
 
+import app.singular.core.Snowflake
 import app.singular.domain.Message
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
@@ -120,6 +121,40 @@ class MessageRepository(private val jdbc: JdbcClient) {
         .query(::mapMessage)
         .optional()
         .orElse(null)
+
+    /**
+     * Several messages by id, for the channel-list previews.
+     *
+     * Takes the same two-sided `created_at` window as [page] rather than one predicate per id.
+     * `messages` is partitioned by month, and without a bounded window the planner has to
+     * touch every partition; with it, a set of ids minted within days of each other prunes to
+     * one or two. The window is derived from the ids themselves — a snowflake carries its own
+     * timestamp — so it costs no extra round trip.
+     *
+     * Deleted messages are simply absent from the result: a channel whose last message was
+     * deleted shows no preview rather than a ghost.
+     */
+    fun findAllById(ids: Collection<Long>): Map<Long, Message> {
+        if (ids.isEmpty()) return emptyMap()
+        val stamps = ids.map(Snowflake::timestampOf)
+        return jdbc
+            .sql(
+                """
+                SELECT id, channel_id, author_id, content, reply_to_id, created_at, edited_at,
+                       location_lat, location_lon, location_label, location_expires_at
+                FROM messages
+                WHERE id IN (:ids)
+                  AND created_at BETWEEN :from AND :to
+                  AND deleted_at IS NULL
+                """
+            )
+            .param("ids", ids.toList())
+            .param("from", Timestamp.from(stamps.min().minusSeconds(1)))
+            .param("to", Timestamp.from(stamps.max().plusSeconds(1)))
+            .query(::mapMessage)
+            .list()
+            .associateBy { it.id }
+    }
 
     // -- Idempotency ---------------------------------------------------------
     //

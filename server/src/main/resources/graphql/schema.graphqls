@@ -21,6 +21,13 @@ type User {
   "Free-form, non-unique. This is what the UI shows."
   displayName: String
   avatarKey: String
+  """
+  Presigned, short-lived URL for the avatar. NULL when there isn't one.
+
+  Never cache it — it carries its own expiry. Cache against `avatarKey`, which is stable
+  for the life of the picture.
+  """
+  avatarUrl: String
   bannerKey: String
   bio: String
   accentColor: Int
@@ -51,6 +58,10 @@ type Channel {
   iconKey: String
   members: [User!]!
   lastMessageId: Snowflake
+  "The newest message, for the sidebar preview. NULL if the channel is empty or it was deleted."
+  lastMessage: Message
+  "The GUILD_CATEGORY this channel is grouped under. NULL for DMs and uncategorised channels."
+  parentId: Snowflake
   createdAt: DateTime!
 }
 
@@ -172,6 +183,13 @@ type Subscription {
   client doesn't have to remember to.
   """
   typing(channelId: Snowflake!): TypingEvent!
+  """
+  Messages from every channel you can read, for desktop and mobile notifications.
+
+  Excludes your own. Membership is resolved at subscribe time, so a client reopens this
+  when its channel list changes.
+  """
+  notifications: Message!
 }
 
 # ---------------------------------------------------------------------------
@@ -380,8 +398,19 @@ extend type Mutation {
   updateSettings(input: SettingsInput!): UserSettings!
 
   """
+  Changes your username, keeping your discriminator when it is free under the new name.
+
+  `asep#1234` -> `hehe` gives `hehe#1234`; renaming back gives `asep#1234` again unless
+  someone claimed it meanwhile, in which case you get a fresh number. Several people can
+  share a username — only the `name#number` pair is unique.
+  """
+  changeUsername(username: String!): User!
+
+  """
   Feature 13. Every field is optional and null means "leave it alone", so a client changing
   one thing never has to resend the rest.
+
+  `avatarKey` is an attachment id, not an object key — see `User.avatarUrl`.
   """
   updateProfile(
     displayName: String
@@ -407,6 +436,13 @@ type Guild {
   id: Snowflake!
   name: String!
   iconKey: String
+  """
+  Presigned, short-lived URL for the icon. NULL when there is no icon.
+
+  Never cache it — it carries its own expiry. Cache against `iconKey` instead, which is
+  stable for the life of the icon.
+  """
+  iconUrl: String
   bannerKey: String
   description: String
   ownerId: Snowflake!

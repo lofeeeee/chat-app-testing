@@ -12,6 +12,8 @@ call "%~dp0_env.bat" || exit /b 1
 echo   JDK: %JAVA_HOME%
 echo.
 
+REM Only the app processes. Containers are left alone: rebuilding Kotlin has no bearing on
+REM the database, and tearing it down would wipe your accounts every time you rebuild.
 echo   Stopping anything still running...
 taskkill /f /fi "WINDOWTITLE eq Singular server*" >nul 2>&1
 taskkill /f /fi "WINDOWTITLE eq Singular client*" >nul 2>&1

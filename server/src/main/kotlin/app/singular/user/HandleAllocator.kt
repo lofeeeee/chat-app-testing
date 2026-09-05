@@ -14,40 +14,56 @@ import kotlin.random.Random
  *   * Uniqueness is on the PAIR `(lower(username), discriminator)` — never on username alone.
  *     Up to 9,999 people can share a name.
  *   * The number is drawn at random from whatever is still free **for that specific name**.
- *   * You never carry it with you. Renaming away releases it; renaming back draws a fresh one.
- *     So `alex#0971` -> `sam#4412` -> back to `alex` yields `alex#1239`, because `#0971` was
- *     released the moment you left and may already be gone.
  *
- * Two deliberate departures from the original:
+ * Three deliberate departures from the original:
  *
- *   1. Released pairs are quarantined for [QUARANTINE]. Discord's version let anyone grab a
- *      freed handle the instant its owner renamed, which made impersonation trivial and was a
- *      real factor in the scheme's retirement in 2023.
- *   2. `#0000` is reserved for system accounts, so the usable space is 1..9999.
+ *   1. **Your number follows you where it can.** Discord released the discriminator the instant
+ *      you renamed and drew a fresh one if you came back. Here a rename keeps your number when
+ *      that pair is free under the new name, so `asep#1234` -> `hehe#1234` -> back to
+ *      `asep#1234`. You only get a new one when someone took the pair while you were away:
+ *      then it's `asep#5819`. See [UserService.changeUsername].
+ *   2. Released pairs are quarantined for [QUARANTINE] — but only against *other* people.
+ *      Discord's version let anyone grab a freed handle the instant its owner renamed, which
+ *      made impersonation trivial and was a real factor in the scheme's retirement in 2023.
+ *      Applying that window to the previous owner too would defeat rule 1.
+ *   3. `#0000` is reserved for system accounts, so the usable space is 1..9999.
  */
 @Component
 class HandleAllocator(private val users: UserRepository) {
 
     /**
-     * @param attempt inserts the candidate and returns false if the unique index rejected it.
-     *                Passing the insert in keeps allocation and creation in one atomic step —
-     *                a check-then-insert would race with concurrent registrations.
+     * @param forUserId whoever the handle is for. Exempts them from their own quarantine rows.
+     * @param attempt   writes the candidate and returns false if the unique index rejected it.
+     *                  Passing the write in keeps allocation and persistence in one atomic
+     *                  step — a check-then-write would race with concurrent registrations.
      */
-    fun allocate(username: String, attempt: (Short) -> Boolean): Short {
-        // Fast path. While a name is sparsely used, a blind random draw almost always lands,
-        // and costs one insert instead of a scan.
+    fun allocate(
+        username: String,
+        forUserId: Long? = null,
+        attempt: (Short) -> Boolean,
+    ): Short {
+        // Loaded up front, and consulted by BOTH phases below.
+        //
+        // The quarantine cannot be left to the slow path. A released pair is by definition
+        // absent from `users`, so the unique index has no opinion on it — a blind random draw
+        // would take one happily, and since the draw succeeds almost every time, the window
+        // would protect essentially nothing. One indexed read is the price of it working.
+        val quarantined = users.quarantinedDiscriminators(
+            username,
+            Instant.now().minus(QUARANTINE),
+            exceptUserId = forUserId,
+        )
+
+        // Fast path. While a name is sparsely used, a random draw almost always lands, and
+        // costs one write instead of a scan.
         repeat(RANDOM_ATTEMPTS) {
             val candidate = Random.nextInt(MIN, MAX + 1).toShort()
-            if (attempt(candidate)) return candidate
+            if (candidate !in quarantined && attempt(candidate)) return candidate
         }
 
         // Crowded name. Enumerate what's actually free — worst case 9,999 smallints, which is
         // one index-only scan, not a table scan.
-        val unavailable = buildSet {
-            addAll(users.takenDiscriminators(username))
-            addAll(users.quarantinedDiscriminators(username, Instant.now().minus(QUARANTINE)))
-        }
-
+        val unavailable = users.takenDiscriminators(username) + quarantined
         val free = (MIN..MAX).filter { it.toShort() !in unavailable }
         if (free.isEmpty()) throw NameExhausted(username)
 

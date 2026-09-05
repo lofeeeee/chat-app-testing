@@ -11,7 +11,7 @@ object Operations {
 
     private const val USER_FIELDS = """
         fragment UserFields on User {
-            id username discriminator handle displayName avatarKey bannerKey
+            id username discriminator handle displayName avatarKey avatarUrl bannerKey
             bio pronouns accentColor borderKey
             blockedByViewer
             presence { userId status customText customEmoji }
@@ -34,10 +34,20 @@ object Operations {
         }
     """
 
+    /**
+     * `lastMessage` is selected narrowly on purpose — see [app.singular.client.net.LastMessageDto].
+     * Pulling the full MessageFields here would make every sidebar load sign a presigned URL
+     * per attachment for text nobody reads.
+     */
     private const val CHANNEL_FIELDS = """
         fragment ChannelFields on Channel {
-            id type name lastMessageId
+            id type name lastMessageId parentId
             members { ...UserFields }
+            lastMessage {
+                id content createdAt
+                author { id username discriminator handle displayName }
+                attachments { id kind }
+            }
         }
     """
 
@@ -148,12 +158,29 @@ object Operations {
     val UPDATE_PROFILE = """
         $USER_FIELDS
         mutation UpdateProfile(
-            ${'$'}displayName: String, ${'$'}bio: String, ${'$'}pronouns: String, ${'$'}accentColor: Int
+            ${'$'}displayName: String, ${'$'}bio: String, ${'$'}pronouns: String,
+            ${'$'}accentColor: Int, ${'$'}avatarKey: String
         ) {
             updateProfile(
                 displayName: ${'$'}displayName, bio: ${'$'}bio,
-                pronouns: ${'$'}pronouns, accentColor: ${'$'}accentColor
+                pronouns: ${'$'}pronouns, accentColor: ${'$'}accentColor,
+                avatarKey: ${'$'}avatarKey
             ) { ...UserFields }
+        }
+    """
+
+    /**
+     * Revokes the refresh token's whole rotation family, so signing out on this device really
+     * does end the session rather than just forgetting it locally.
+     */
+    val LOGOUT = """
+        mutation Logout(${'$'}token: String!) { logout(refreshToken: ${'$'}token) }
+    """
+
+    val CHANGE_USERNAME = """
+        $USER_FIELDS
+        mutation ChangeUsername(${'$'}username: String!) {
+            changeUsername(username: ${'$'}username) { ...UserFields }
         }
     """
 
@@ -271,6 +298,19 @@ object Operations {
             messageCreated(channelId: ${'$'}channelId) { ...MessageFields }
         }
     """
+
+    /**
+     * One stream for every channel you can read — what the desktop toast listens on.
+     *
+     * Separate from MESSAGE_CREATED because that one is scoped to the conversation you have
+     * open, which is exactly the one you never want to be notified about.
+     */
+    val NOTIFICATIONS = """
+        $USER_FIELDS
+        $ATTACHMENT_FIELDS
+        $MESSAGE_FIELDS
+        subscription OnNotification { notifications { ...MessageFields } }
+    """
 }
 
 /** Session management and QR sign-in. Kept apart from [Operations] purely for readability. */
@@ -350,5 +390,107 @@ object AuthOperations {
                 }
             }
         }
+    """
+}
+
+/** Servers, roles and invites. Separate object so [Operations] stays about conversations. */
+object GuildOperations {
+
+    private const val USER_FIELDS = """
+        fragment UserFields on User {
+            id username discriminator handle displayName avatarKey avatarUrl bannerKey
+            bio pronouns accentColor borderKey
+            blockedByViewer
+            presence { userId status customText customEmoji }
+        }
+    """
+
+    private const val GUILD_FIELDS = """
+        fragment GuildFields on Guild {
+            id name iconKey iconUrl description ownerId myPermissions
+            channels { id type name lastMessageId parentId }
+            roles { id name color position permissions hoist mentionable isDefault }
+            me { guildId nickname displayName user { ...UserFields } }
+        }
+    """
+
+    val GUILDS = """
+        $USER_FIELDS
+        $GUILD_FIELDS
+        query Guilds { guilds { ...GuildFields } }
+    """
+
+    val CREATE_GUILD = """
+        $USER_FIELDS
+        $GUILD_FIELDS
+        mutation CreateGuild(${'$'}name: String!) {
+            createGuild(name: ${'$'}name) { ...GuildFields }
+        }
+    """
+
+    val CREATE_GUILD_CHANNEL = """
+        mutation CreateGuildChannel(
+            ${'$'}guildId: Snowflake!, ${'$'}name: String!,
+            ${'$'}type: ChannelType, ${'$'}parentId: Snowflake
+        ) {
+            createGuildChannel(
+                guildId: ${'$'}guildId, name: ${'$'}name, type: ${'$'}type, parentId: ${'$'}parentId
+            ) {
+                id type name lastMessageId parentId
+            }
+        }
+    """
+
+    val UPDATE_GUILD = """
+        $USER_FIELDS
+        $GUILD_FIELDS
+        mutation UpdateGuild(
+            ${'$'}id: Snowflake!, ${'$'}name: String, ${'$'}iconKey: String, ${'$'}description: String
+        ) {
+            updateGuild(id: ${'$'}id, name: ${'$'}name, iconKey: ${'$'}iconKey, description: ${'$'}description) {
+                ...GuildFields
+            }
+        }
+    """
+
+    val INVITES = """
+        query Invites(${'$'}guildId: Snowflake!) {
+            invites(guildId: ${'$'}guildId) { code guildId uses maxUses }
+        }
+    """
+
+    val GUILD_MEMBERS = """
+        $USER_FIELDS
+        query GuildMembers(${'$'}guildId: Snowflake!) {
+            guildMembers(guildId: ${'$'}guildId) {
+                guildId nickname displayName
+                user { ...UserFields }
+                roles { id name color position permissions hoist mentionable isDefault }
+            }
+        }
+    """
+
+    val CREATE_INVITE = """
+        mutation CreateInvite(${'$'}guildId: Snowflake!) {
+            createInvite(guildId: ${'$'}guildId) { code guildId uses maxUses }
+        }
+    """
+
+    val REDEEM_INVITE = """
+        $USER_FIELDS
+        $GUILD_FIELDS
+        mutation RedeemInvite(${'$'}code: String!) {
+            redeemInvite(code: ${'$'}code) { ...GuildFields }
+        }
+    """
+
+    val SET_NICKNAME = """
+        mutation SetNickname(${'$'}guildId: Snowflake!, ${'$'}nickname: String) {
+            setNickname(guildId: ${'$'}guildId, nickname: ${'$'}nickname)
+        }
+    """
+
+    val LEAVE_GUILD = """
+        mutation LeaveGuild(${'$'}id: Snowflake!) { leaveGuild(id: ${'$'}id) }
     """
 }

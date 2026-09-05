@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -18,12 +19,23 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -40,7 +52,47 @@ fun LoginScreen(state: AppState, qr: QrLoginState) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
 
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    val focus = LocalFocusManager.current
+    val firstField = remember { FocusRequester() }
+
+    val canSubmit =
+        if (registering) username.isNotBlank() && email.isNotBlank() && password.isNotBlank()
+        else loginEmail.isNotBlank() && password.isNotBlank()
+
+    val submit = {
+        if (canSubmit && !state.busy) {
+            // Drop focus first so the soft keyboard closes on mobile and the field stops
+            // swallowing keys while the request is in flight.
+            focus.clearFocus()
+            if (registering) state.register(username.trim(), email.trim(), password)
+            else state.login(loginEmail.trim(), password)
+        }
+    }
+
+    // Enter submits, Tab walks the form. Shared with every other form in the app so the
+    // behaviour cannot drift between them.
+    fun Modifier.formKeys(): Modifier = formField(focus, canSubmit && !state.busy, submit)
+
+    // Lands in the first field on arrival and whenever the form swaps between sign-in and
+    // register, so the whole thing is typeable without reaching for the mouse.
+    LaunchedEffect(registering, tab) {
+        if (tab == 0) runCatching { firstField.requestFocus() }
+    }
+
+    // Escape backs out of the register form to sign-in — the only "back" this screen has.
+    // There is nowhere further to go, so it does nothing on the sign-in form rather than
+    // consuming the key.
+    KeyboardScope(
+        onPreviewKey = { event ->
+            if (event.isPress && event.key == Key.Escape && (registering || tab == 1)) {
+                registering = false
+                tab = 0
+                state.dismissError()
+                true
+            } else false
+        },
+    ) {
+      Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Card(Modifier.widthIn(max = 400.dp).padding(24.dp)) {
             Column(
                 Modifier.padding(28.dp).fillMaxWidth(),
@@ -79,15 +131,19 @@ fun LoginScreen(state: AppState, qr: QrLoginState) {
                         label = { Text("Username") },
                         supportingText = { Text("Letters, numbers, _ and . — 2 to 32 characters") },
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                        modifier = Modifier.fillMaxWidth().focusRequester(firstField).formKeys(),
                     )
                     OutlinedTextField(
                         value = email,
                         onValueChange = { email = it },
                         label = { Text("Email") },
                         singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                        modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Email,
+                            imeAction = ImeAction.Next,
+                        ),
+                        modifier = Modifier.fillMaxWidth().formKeys(),
                     )
                 } else {
                     OutlinedTextField(
@@ -96,8 +152,11 @@ fun LoginScreen(state: AppState, qr: QrLoginState) {
                         label = { Text("Email") },
                         placeholder = { Text("you@example.com") },
                         singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                        modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Email,
+                            imeAction = ImeAction.Next,
+                        ),
+                        modifier = Modifier.fillMaxWidth().focusRequester(firstField).formKeys(),
                     )
                 }
 
@@ -114,7 +173,8 @@ fun LoginScreen(state: AppState, qr: QrLoginState) {
                         keyboardType = KeyboardType.Password,
                         imeAction = ImeAction.Done,
                     ),
-                    modifier = Modifier.fillMaxWidth(),
+                    keyboardActions = KeyboardActions(onDone = { submit() }),
+                    modifier = Modifier.fillMaxWidth().formKeys(),
                 )
 
                 state.error?.let {
@@ -123,14 +183,8 @@ fun LoginScreen(state: AppState, qr: QrLoginState) {
                 }
 
                 Button(
-                    onClick = {
-                        if (registering) {
-                            state.register(username.trim(), email.trim(), password)
-                        } else {
-                            state.login(loginEmail.trim(), password)
-                        }
-                    },
-                    enabled = !state.busy,
+                    onClick = submit,
+                    enabled = !state.busy && canSubmit,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     if (state.busy) {
@@ -151,5 +205,6 @@ fun LoginScreen(state: AppState, qr: QrLoginState) {
                 }
             }
         }
+      }
     }
 }

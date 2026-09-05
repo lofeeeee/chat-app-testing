@@ -6,9 +6,17 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import app.singular.client.net.AttachmentBriefDto
 import app.singular.client.net.ChannelDto
 import app.singular.client.net.ChannelsData
 import app.singular.client.net.GraphQlException
+import app.singular.client.net.InviteDto
+import app.singular.client.net.InvitesData
+import app.singular.client.net.LastMessageDto
+import app.singular.client.net.NotificationsData
+import app.singular.client.net.UpdateGuildData
+import app.singular.client.net.isNewerSnowflake
+import app.singular.client.platform.showNotification
 import app.singular.client.net.LoginData
 import app.singular.client.net.MessageCreatedData
 import app.singular.client.net.MessageDto
@@ -29,6 +37,13 @@ import app.singular.client.net.CreateStoryData
 import app.singular.client.net.CreateUploadData
 import app.singular.client.net.FinalizeUploadData
 import app.singular.client.net.SendLocationData
+import app.singular.client.net.CreateGuildChannelData
+import app.singular.client.net.CreateGuildData
+import app.singular.client.net.CreateInviteData
+import app.singular.client.net.GuildDto
+import app.singular.client.net.GuildOperations
+import app.singular.client.net.GuildsData
+import app.singular.client.net.RedeemInviteData
 import app.singular.client.net.SingularClient
 import app.singular.client.net.StoryDto
 import app.singular.client.net.StoryFeedData
@@ -36,6 +51,7 @@ import app.singular.client.platform.PickedFile
 import app.singular.client.platform.pickFile
 import app.singular.client.net.UnblockData
 import app.singular.client.net.UnmuteChannelData
+import app.singular.client.net.ChangeUsernameData
 import app.singular.client.net.UpdateProfileData
 import app.singular.client.net.UpdateSettingsData
 import app.singular.client.net.UserSettingsDto
@@ -137,10 +153,50 @@ class AppState(
 
     val stories = mutableStateListOf<StoryDto>()
 
+    /** Servers you're in. The rail on the far left. */
+    val guilds = mutableStateListOf<GuildDto>()
+
+    /**
+     * Which server is open, or null for direct messages.
+     *
+     * Null is the DM "home" rather than a separate flag, so there is exactly one variable
+     * describing where you are — two would drift and produce a sidebar showing a server's
+     * channels while the header says Direct messages.
+     */
+    var selectedGuild by mutableStateOf<GuildDto?>(null)
+        private set
+
+    var lastInviteCode by mutableStateOf<String?>(null)
+
+    /** Invite codes for the server whose settings are open. */
+    val guildInvites = mutableStateListOf<InviteDto>()
+
+    /**
+     * Newest message per channel, for the sidebar preview line.
+     *
+     * A map beside the channel list rather than a field mutated inside [ChannelDto], because
+     * a new message has to update the preview *without* refetching the channel list — and
+     * copying a DTO in a `SnapshotStateList` on every inbound message would rebuild every row
+     * in the sidebar instead of the one that changed.
+     *
+     * Seeded from `Channel.lastMessage` on load, then kept current by [noteActivity].
+     */
+    val lastMessages = mutableStateMapOf<String, LastMessageDto>()
+
+    /**
+     * Channels with something unread, for the sidebar dot.
+     *
+     * Cleared by opening the channel. Deliberately client-side and not persisted: the server
+     * has a read cursor (`markRead`), but wiring the badge to it belongs with the unread-count
+     * work rather than being half-done here.
+     */
+    val unread = mutableStateMapOf<String, Boolean>()
+
     private var refreshToken: String? = null
     private var subscription: Job? = null
     private var typingSubscription: Job? = null
     private var presenceSubscription: Job? = null
+    private var notificationSubscription: Job? = null
     private var heartbeatJob: Job? = null
     private val typingExpiry = mutableMapOf<String, Job>()
     private var lastTypingSent = TimeSource.Monotonic.markNow() - TYPING_THROTTLE
@@ -213,6 +269,9 @@ class AppState(
         watchPresence()
         startHeartbeat()
         runCatching { loadStories() }
+        runCatching { loadGuilds() }
+        // Last: it subscribes to whatever channels and servers the two loads above found.
+        watchNotifications()
     }
 
     /**
@@ -335,6 +394,110 @@ class AppState(
         currentUser = updated
     }
 
+    /**
+     * Renames the account.
+     *
+     * The discriminator is decided entirely by the server — it keeps your number when the pair
+     * is free under the new name and draws a fresh one when it isn't. The client must not
+     * predict it, so the returned user replaces the local copy wholesale.
+     */
+    fun changeUsername(username: String) = run {
+        currentUser = client.execute<ChangeUsernameData>(
+            Operations.CHANGE_USERNAME,
+            buildJsonObject { put("username", username.trim()) },
+        ).user
+    }
+
+    /**
+     * Picks a picture and makes it the profile photo.
+     *
+     * Same three-step upload as any attachment, so an avatar gets the same EXIF stripping and
+     * thumbnailing as anything else off a user's disk. Only the finalized attachment id is
+     * stored on the profile; the server signs a URL for it on read.
+     */
+    fun changeAvatar() {
+        scope.launch {
+            try {
+                val file = pickFile(imagesOnly = true) ?: return@launch
+                uploadProgress = 0f
+
+                val slot = client.execute<CreateUploadData>(
+                    Operations.CREATE_UPLOAD,
+                    buildJsonObject {
+                        put("filename", file.name)
+                        put("contentType", file.contentType)
+                        put("sizeBytes", file.sizeBytes.toString())
+                        put("voiceNote", false)
+                    },
+                ).slot
+
+                uploadProgress = 0.3f
+                if (!client.putBytes(slot.uploadUrl, file.bytes, file.contentType)) {
+                    error = "Upload failed. Check the storage service is running."
+                    return@launch
+                }
+
+                uploadProgress = 0.8f
+                client.execute<FinalizeUploadData>(
+                    Operations.FINALIZE_UPLOAD,
+                    buildJsonObject { put("attachmentId", slot.attachment.id) },
+                )
+
+                currentUser = client.execute<UpdateProfileData>(
+                    Operations.UPDATE_PROFILE,
+                    buildJsonObject { put("avatarKey", slot.attachment.id) },
+                ).user
+            } catch (e: Exception) {
+                error = describe(e)
+            } finally {
+                uploadProgress = null
+            }
+        }
+    }
+
+    /**
+     * Signs out.
+     *
+     * Tears down every live subscription before clearing the user, in that order. Clearing
+     * first would drop the UI to the login screen while sockets carried on delivering into a
+     * state nobody is showing — and the reconnect loops would keep running with a token that
+     * is about to be revoked.
+     */
+    fun signOut() {
+        subscription?.cancel()
+        typingSubscription?.cancel()
+        presenceSubscription?.cancel()
+        notificationSubscription?.cancel()
+        heartbeatJob?.cancel()
+        clearTyping()
+
+        val token = refreshToken
+        scope.launch {
+            // Best effort. A failed revoke must not strand someone on a screen they asked to
+            // leave — the access token expires shortly anyway.
+            runCatching {
+                token?.let {
+                    client.postRaw(Operations.LOGOUT, buildJsonObject { put("token", it) })
+                }
+            }
+        }
+
+        client.accessToken = null
+        refreshToken = null
+        channels.clear()
+        messages.clear()
+        guilds.clear()
+        stories.clear()
+        lastMessages.clear()
+        unread.clear()
+        mutedChannels.clear()
+        presence.clear()
+        selectedChannel = null
+        selectedGuild = null
+        error = null
+        currentUser = null
+    }
+
     fun blockUser(userId: String) = run {
         client.execute<BlockData>(Operations.BLOCK_USER, buildJsonObject { put("userId", userId) })
         // Refetch rather than patch in place: blocking changes authorBlocked on every message
@@ -365,10 +528,22 @@ class AppState(
         val loaded = client.execute<ChannelsData>(Operations.CHANNELS).channels
         channels.clear()
         channels.addAll(loaded)
+
+        // Seed the previews. Anything already newer in the map — a message that arrived
+        // between the request and the response — wins, so a refresh can't roll the sidebar
+        // backwards to a message that has since been superseded.
+        loaded.forEach { channel ->
+            val fresh = channel.lastMessage ?: return@forEach
+            val existing = lastMessages[channel.id]
+            if (existing == null || isNewerSnowflake(fresh.id, existing.id)) {
+                lastMessages[channel.id] = fresh
+            }
+        }
     }
 
     fun openChannel(channel: ChannelDto) = run {
         selectedChannel = channel
+        unread.remove(channel.id)
         val vars = buildJsonObject {
             put("channelId", channel.id)
             put("limit", 50)
@@ -446,11 +621,31 @@ class AppState(
         ).channel
 
         loadChannels()
+        // The new conversation is not in the notification stream the server resolved when the
+        // socket opened, so without this the first message in a brand-new DM would arrive
+        // silently until the next relaunch.
+        watchNotifications()
         openChannelNow(channel)
+    }
+
+    /**
+     * Leaves the conversation without leaving the app — what Escape does.
+     *
+     * Tears the subscriptions down rather than leaving them running behind an empty pane: a
+     * closed conversation that keeps streaming is how you end up with a dozen live sockets
+     * after ten minutes of clicking around.
+     */
+    fun closeChannel() {
+        selectedChannel = null
+        messages.clear()
+        subscription?.cancel()
+        typingSubscription?.cancel()
+        clearTyping()
     }
 
     private suspend fun openChannelNow(channel: ChannelDto) {
         selectedChannel = channel
+        unread.remove(channel.id)
         val page = client.execute<MessagesData>(
             Operations.MESSAGES,
             buildJsonObject { put("channelId", channel.id); put("limit", 50) },
@@ -635,43 +830,71 @@ class AppState(
     }
 
     /**
-     * Posts a story from a picked image.
+     * Opens the picker and hands the bytes back, without uploading anything.
+     *
+     * Split out from [postStory] because the editor needs the picture *before* the story is
+     * posted — it has to draw a live preview, and you have to be able to change your mind
+     * about the photo without having already uploaded the last one. Uploading on pick would
+     * leave an orphaned attachment behind every time someone re-chose.
+     */
+    fun pickStoryImage(onPicked: (PickedFile) -> Unit) {
+        scope.launch {
+            // Cancelling is not an error and must not surface one.
+            runCatching { pickFile(imagesOnly = true) }.getOrNull()?.let(onPicked)
+        }
+    }
+
+    /**
+     * Posts a story — text-only, or a photo with overlays.
+     *
+     * [image] null means a text story: nothing is uploaded and the server stores the
+     * background id instead of an attachment. That is the whole difference between the two
+     * kinds, which is why one function covers both rather than two that drift apart.
      *
      * Overlays go up as JSON and are composited by the client at view time — never baked into
      * the image, so a story stays restylable and a typo doesn't mean re-uploading.
      */
-    fun postStory(overlaysJson: String = "[]") {
+    fun postStory(
+        overlaysJson: String = "[]",
+        backgroundId: String? = null,
+        image: PickedFile? = null,
+    ) {
         scope.launch {
             try {
-                val file = pickFile(imagesOnly = true) ?: return@launch
-                uploadProgress = 0f
+                uploadProgress = if (image == null) null else 0f
 
-                val slot = client.execute<CreateUploadData>(
-                    Operations.CREATE_UPLOAD,
-                    buildJsonObject {
-                        put("filename", file.name)
-                        put("contentType", file.contentType)
-                        put("sizeBytes", file.sizeBytes.toString())
-                        put("voiceNote", false)
-                    },
-                ).slot
+                // Three round trips for a photo — sign, PUT, finalize — and none at all for
+                // text. See attachAndSend for why the order matters.
+                val attachmentId = image?.let { file ->
+                    val slot = client.execute<CreateUploadData>(
+                        Operations.CREATE_UPLOAD,
+                        buildJsonObject {
+                            put("filename", file.name)
+                            put("contentType", file.contentType)
+                            put("sizeBytes", file.sizeBytes.toString())
+                            put("voiceNote", false)
+                        },
+                    ).slot
 
-                uploadProgress = 0.3f
-                if (!client.putBytes(slot.uploadUrl, file.bytes, file.contentType)) {
-                    error = "Upload failed."
-                    return@launch
+                    uploadProgress = 0.3f
+                    if (!client.putBytes(slot.uploadUrl, file.bytes, file.contentType)) {
+                        error = "Upload failed. Check the storage service is running."
+                        return@launch
+                    }
+
+                    uploadProgress = 0.8f
+                    client.execute<FinalizeUploadData>(
+                        Operations.FINALIZE_UPLOAD,
+                        buildJsonObject { put("attachmentId", slot.attachment.id) },
+                    )
+                    slot.attachment.id
                 }
-
-                uploadProgress = 0.8f
-                client.execute<FinalizeUploadData>(
-                    Operations.FINALIZE_UPLOAD,
-                    buildJsonObject { put("attachmentId", slot.attachment.id) },
-                )
 
                 val story = client.execute<CreateStoryData>(
                     Operations.CREATE_STORY,
                     buildJsonObject {
-                        put("attachmentId", slot.attachment.id)
+                        attachmentId?.let { put("attachmentId", it) }
+                        backgroundId?.let { put("background", it) }
                         put("overlays", overlaysJson)
                     },
                 ).story
@@ -698,6 +921,324 @@ class AppState(
         }
     }
 
+    // -- Servers (features 3, 10, 14, 18, 19) --------------------------------
+
+    suspend fun loadGuilds() {
+        val loaded = client.execute<GuildsData>(GuildOperations.GUILDS).guilds
+        guilds.clear()
+        guilds.addAll(loaded)
+
+        // Keep the open server pointing at the freshly loaded copy, or drop it if we were
+        // removed. Holding a stale DTO would show channels we can no longer read.
+        selectedGuild = selectedGuild?.let { current -> loaded.firstOrNull { it.id == current.id } }
+    }
+
+    /**
+     * Switches to a server, or back to direct messages when [guild] is null.
+     *
+     * Clears the open conversation deliberately: a DM left selected while a server is showing
+     * would put someone else's private conversation on screen under a server's header.
+     */
+    fun openGuild(guild: GuildDto?) {
+        selectedGuild = guild
+        selectedChannel = null
+        messages.clear()
+        subscription?.cancel()
+        typingSubscription?.cancel()
+        clearTyping()
+    }
+
+    fun createGuild(name: String) = run {
+        val guild = client.execute<CreateGuildData>(
+            GuildOperations.CREATE_GUILD,
+            buildJsonObject { put("name", name.trim()) },
+        ).guild
+        loadGuilds()
+        selectedGuild = guilds.firstOrNull { it.id == guild.id }
+        selectedChannel = null
+    }
+
+    fun createGuildChannel(
+        guildId: String,
+        name: String,
+        type: String = "GUILD_TEXT",
+        parentId: String? = null,
+    ) = run {
+        client.execute<CreateGuildChannelData>(
+            GuildOperations.CREATE_GUILD_CHANNEL,
+            buildJsonObject {
+                put("guildId", guildId)
+                put("name", name.trim())
+                put("type", type)
+                parentId?.let { put("parentId", it) }
+            },
+        )
+        loadGuilds()
+        watchNotifications()
+    }
+
+    /** Server settings: rename, re-describe, or re-icon. Nulls are left as they are. */
+    fun updateGuild(
+        guildId: String,
+        name: String? = null,
+        description: String? = null,
+        iconKey: String? = null,
+    ) = run {
+        client.execute<UpdateGuildData>(
+            GuildOperations.UPDATE_GUILD,
+            buildJsonObject {
+                put("id", guildId)
+                name?.let { put("name", it.trim()) }
+                description?.let { put("description", it.trim()) }
+                iconKey?.let { put("iconKey", it) }
+            },
+        )
+        loadGuilds()
+    }
+
+    /**
+     * Picks an image and makes it the server icon.
+     *
+     * Runs the same three-step upload as an attachment — sign, PUT, finalize — so the icon
+     * gets the same EXIF stripping and thumbnailing as anything else that arrives from a
+     * user's disk. Only the finalized attachment id is stored on the guild.
+     */
+    fun changeGuildIcon(guildId: String) {
+        scope.launch {
+            try {
+                val file = pickFile(imagesOnly = true) ?: return@launch
+                uploadProgress = 0f
+
+                val slot = client.execute<CreateUploadData>(
+                    Operations.CREATE_UPLOAD,
+                    buildJsonObject {
+                        put("filename", file.name)
+                        put("contentType", file.contentType)
+                        put("sizeBytes", file.sizeBytes.toString())
+                        put("voiceNote", false)
+                    },
+                ).slot
+
+                uploadProgress = 0.3f
+                if (!client.putBytes(slot.uploadUrl, file.bytes, file.contentType)) {
+                    error = "Upload failed. Check the storage service is running."
+                    return@launch
+                }
+
+                uploadProgress = 0.8f
+                client.execute<FinalizeUploadData>(
+                    Operations.FINALIZE_UPLOAD,
+                    buildJsonObject { put("attachmentId", slot.attachment.id) },
+                )
+
+                client.execute<UpdateGuildData>(
+                    GuildOperations.UPDATE_GUILD,
+                    buildJsonObject { put("id", guildId); put("iconKey", slot.attachment.id) },
+                )
+                loadGuilds()
+            } catch (e: Exception) {
+                error = describe(e)
+            } finally {
+                uploadProgress = null
+            }
+        }
+    }
+
+    /** Every invite code for a server, so settings can list them rather than mint a new one. */
+    fun loadInvites(guildId: String) = run {
+        val loaded = client.execute<InvitesData>(
+            GuildOperations.INVITES,
+            buildJsonObject { put("guildId", guildId) },
+        ).invites
+        guildInvites.clear()
+        guildInvites.addAll(loaded)
+    }
+
+    fun createInvite(guildId: String) = run {
+        val invite = client.execute<CreateInviteData>(
+            GuildOperations.CREATE_INVITE,
+            buildJsonObject { put("guildId", guildId) },
+        ).invite
+        lastInviteCode = invite.code
+        guildInvites.add(0, invite)
+    }
+
+    fun redeemInvite(code: String) = run {
+        val guild = client.execute<RedeemInviteData>(
+            GuildOperations.REDEEM_INVITE,
+            buildJsonObject { put("code", code.trim()) },
+        ).guild
+        loadGuilds()
+        // A server just joined isn't in the notification stream the server resolved earlier.
+        watchNotifications()
+        selectedGuild = guilds.firstOrNull { it.id == guild.id }
+    }
+
+    fun setNickname(guildId: String, nickname: String?) = run {
+        client.postRaw(
+            GuildOperations.SET_NICKNAME,
+            buildJsonObject {
+                put("guildId", guildId)
+                nickname?.let { put("nickname", it) }
+            },
+        )
+        loadGuilds()
+    }
+
+    fun leaveGuild(guildId: String) = run {
+        client.postRaw(GuildOperations.LEAVE_GUILD, buildJsonObject { put("id", guildId) })
+        if (selectedGuild?.id == guildId) openGuild(null)
+        loadGuilds()
+    }
+
+    // -- Keyboard navigation -------------------------------------------------
+
+    /**
+     * The list Alt+Up / Alt+Down walks: a server's text channels, or your conversations.
+     *
+     * One property so the shortcut, the sidebar and the "which is selected" check can never
+     * disagree about what the list *is* — a stepper walking a different list from the one on
+     * screen skips rows for no visible reason.
+     */
+    private val navigableChannels: List<ChannelDto>
+        get() = selectedGuild?.channels?.filter { it.type == "GUILD_TEXT" } ?: channels
+
+    /**
+     * Moves [delta] places through that list.
+     *
+     * Clamped rather than wrapped. Wrapping means holding Alt+Down past the end silently
+     * teleports you back to the top, and in a list you are scanning that reads as the shortcut
+     * having lost your place.
+     */
+    fun stepChannel(delta: Int) {
+        val list = navigableChannels
+        if (list.isEmpty()) return
+
+        val current = list.indexOfFirst { it.id == selectedChannel?.id }
+        // From nothing selected, Down opens the first and Up opens the last.
+        val next =
+            if (current < 0) (if (delta > 0) 0 else list.lastIndex)
+            else (current + delta).coerceIn(0, list.lastIndex)
+
+        if (next != current) openChannel(list[next])
+    }
+
+    /** Steps through the rail. Index -1 is home (direct messages), so it is part of the walk. */
+    fun stepGuild(delta: Int) {
+        val current = guilds.indexOfFirst { it.id == selectedGuild?.id }
+        val next = (current + delta).coerceIn(-1, guilds.lastIndex)
+        openGuildAt(next)
+    }
+
+    /** Ctrl+1..9 and Ctrl+0. Out-of-range indexes do nothing rather than jumping to an end. */
+    fun openGuildAt(index: Int) {
+        when {
+            index < 0 -> openGuild(null)
+            index <= guilds.lastIndex -> openGuild(guilds[index])
+            // Ctrl+7 in a four-server list is a mistake, not a request for the last one.
+            else -> Unit
+        }
+    }
+
+    // -- Notifications -------------------------------------------------------
+
+    /**
+     * One socket carrying messages from every channel, so conversations you don't have open
+     * can still update the sidebar and raise a toast.
+     *
+     * The server resolves your channel list when the subscription opens, so this is restarted
+     * whenever that list changes — after loading channels, opening a DM, or joining a server.
+     * Restarting is cheap (one socket) and is the only thing that makes a brand-new
+     * conversation notify without a relaunch.
+     */
+    private fun watchNotifications() {
+        notificationSubscription?.cancel()
+        notificationSubscription = scope.launch {
+            var backoff = 1_000L
+            while (true) {
+                try {
+                    client.subscribe(Operations.NOTIFICATIONS, buildJsonObject { }).collect { data ->
+                        backoff = 1_000L
+                        val message = SingularClient.codec
+                            .decodeFromJsonElement(NotificationsData.serializer(), data).message
+                        onNotified(message)
+                    }
+                } catch (_: Exception) {
+                    // Silent. A dropped notification socket must not put a red banner over a
+                    // conversation that is working perfectly well on its own subscription.
+                }
+                delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(30_000L)
+            }
+        }
+    }
+
+    /**
+     * What to do with a message from the notification stream.
+     *
+     * The sidebar preview updates for every channel; the toast is suppressed for the
+     * conversation already on screen and for muted channels. Those are separate decisions on
+     * purpose — you still want the preview line to be current in a channel you muted.
+     */
+    private fun onNotified(message: MessageDto) {
+        noteActivity(message)
+
+        // Blocked authors are silent by definition — feature 11 would be meaningless if the
+        // person you blocked could still make your machine chime.
+        if (message.authorBlocked) return
+        if (message.channelId == selectedChannel?.id) return
+        if (mutedChannels[message.channelId] == true) return
+
+        unread[message.channelId] = true
+
+        val channel = channels.firstOrNull { it.id == message.channelId }
+            ?: guilds.flatMap { it.channels }.firstOrNull { it.id == message.channelId }
+
+        // In a server channel the title alone ("general") says nothing about who spoke, so the
+        // author goes in the heading there and the channel name after it.
+        val title = when {
+            channel == null -> message.author.label
+            channel.type == "GUILD_TEXT" -> "${message.author.label} · #${channel.name.orEmpty()}"
+            channel.type == "GROUP_DM" -> "${message.author.label} · ${channel.title(currentUser?.id)}"
+            else -> message.author.label
+        }
+
+        showNotification(title, previewOf(message))
+    }
+
+    /** The same one-line summary the sidebar shows, reused so the toast can't disagree with it. */
+    private fun previewOf(message: MessageDto): String =
+        message.content?.replace('\n', ' ')?.trim().orEmpty().ifEmpty {
+            when (message.attachments.firstOrNull()?.kind) {
+                "IMAGE" -> "Photo"
+                "VIDEO" -> "Video"
+                "VOICE_NOTE" -> "Voice message"
+                "AUDIO" -> "Audio"
+                null -> "Shared a location"
+                else -> "Attachment"
+            }
+        }
+
+    /**
+     * Records a message as a channel's newest, for the sidebar preview.
+     *
+     * Guarded on id order rather than "last write wins": the same message can arrive twice —
+     * once from the channel subscription and once from the notification stream — and a
+     * reconnect can replay an older one behind a newer one.
+     */
+    private fun noteActivity(message: MessageDto) {
+        val existing = lastMessages[message.channelId]
+        if (existing != null && !isNewerSnowflake(message.id, existing.id)) return
+
+        lastMessages[message.channelId] = LastMessageDto(
+            id = message.id,
+            content = message.content,
+            createdAt = message.createdAt,
+            author = message.author,
+            attachments = message.attachments.map { AttachmentBriefDto(it.id, it.kind) },
+        )
+    }
+
     /** Snowflakes are unique, so id equality is the whole dedup story. */
     private fun appendIfNew(message: MessageDto) {
         // Sending is the clearest possible signal that someone stopped typing — drop their
@@ -705,6 +1246,7 @@ class AppState(
         typingExpiry.remove(message.author.id)?.cancel()
         typingUsers.remove(message.author.id)
 
+        noteActivity(message)
         if (messages.none { it.id == message.id }) messages.add(message)
     }
 

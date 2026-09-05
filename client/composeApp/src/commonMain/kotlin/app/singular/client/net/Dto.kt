@@ -22,6 +22,8 @@ data class UserDto(
     val handle: String,
     val displayName: String? = null,
     val avatarKey: String? = null,
+    /** Presigned and short-lived. Cache against [avatarKey], never against this. */
+    val avatarUrl: String? = null,
     val bannerKey: String? = null,
     val borderKey: String? = null,
     val bio: String? = null,
@@ -67,10 +69,69 @@ data class ChannelDto(
     val name: String? = null,
     val members: List<UserDto> = emptyList(),
     val lastMessageId: String? = null,
+    /** The category this channel sits under, or null for an uncategorised one. */
+    val parentId: String? = null,
+    val lastMessage: LastMessageDto? = null,
 ) {
     /** 1:1 DMs have no name — they're titled after whoever isn't you. */
     fun title(selfId: String?): String =
         name ?: members.firstOrNull { it.id != selfId }?.label ?: "Direct message"
+
+    val isCategory: Boolean get() = type == "GUILD_CATEGORY"
+}
+
+/**
+ * Just enough of a message to draw a one-line sidebar preview.
+ *
+ * Deliberately not [MessageDto]: the channel list would otherwise pull every attachment's
+ * presigned URL and every author's full profile for a line of grey text nobody clicks. The
+ * server signs upload URLs on read, so asking for attachments here would be doing real work
+ * per conversation on every sidebar load.
+ */
+@Serializable
+data class LastMessageDto(
+    val id: String,
+    val content: String? = null,
+    val createdAt: String,
+    val author: UserDto,
+    val attachments: List<AttachmentBriefDto> = emptyList(),
+) {
+    /**
+     * The preview line, WhatsApp-style: "You: …" when it's yours, plain otherwise.
+     *
+     * An attachment with no caption gets a label rather than an empty row — "Photo" is what
+     * you actually want to read there, and a blank line looks like a bug.
+     */
+    fun preview(selfId: String?): String {
+        val body = content?.replace('\n', ' ')?.trim().orEmpty().ifEmpty {
+            when (attachments.firstOrNull()?.kind) {
+                "IMAGE" -> "Photo"
+                "VIDEO" -> "Video"
+                "VOICE_NOTE" -> "Voice message"
+                "AUDIO" -> "Audio"
+                null -> "Shared a location"
+                else -> "Attachment"
+            }
+        }
+        return if (author.id == selfId) "You: $body" else body
+    }
+}
+
+@Serializable
+data class AttachmentBriefDto(val id: String, val kind: String)
+
+/**
+ * Orders two snowflake id strings by age.
+ *
+ * Ids stay strings the whole way through (see the note at the top of this file), so "newer
+ * than" cannot be a numeric comparison. Snowflakes are time-sortable and unsigned, which makes
+ * a longer decimal string always the larger number — hence length first, then lexicographic
+ * within a length. Comparing them as plain strings would get this wrong the day ids gain a
+ * digit, and would do so silently.
+ */
+fun isNewerSnowflake(candidate: String, than: String): Boolean = when {
+    candidate.length != than.length -> candidate.length > than.length
+    else -> candidate > than
 }
 
 @Serializable
@@ -191,6 +252,7 @@ data class GraphQlResponse<T>(
 @Serializable data class OpenDmData(@SerialName("openDirectMessage") val channel: ChannelDto)
 @Serializable data class UserByHandleData(val userByHandle: UserDto? = null)
 @Serializable data class MessageCreatedData(@SerialName("messageCreated") val message: MessageDto)
+@Serializable data class NotificationsData(@SerialName("notifications") val message: MessageDto)
 
 // -- Session management ------------------------------------------------------
 
@@ -276,9 +338,76 @@ data class TypingEventDto(
 @Serializable data class HeartbeatData(val heartbeat: Boolean)
 
 @Serializable data class UpdateProfileData(@SerialName("updateProfile") val user: UserDto)
+@Serializable data class ChangeUsernameData(@SerialName("changeUsername") val user: UserDto)
 
 @Serializable data class CreateUploadData(@SerialName("createUpload") val slot: UploadSlotDto)
 @Serializable data class FinalizeUploadData(@SerialName("finalizeUpload") val attachment: AttachmentDto)
 @Serializable data class StoryFeedData(@SerialName("storyFeed") val stories: List<StoryDto>)
 @Serializable data class CreateStoryData(@SerialName("createStory") val story: StoryDto)
 @Serializable data class SendLocationData(@SerialName("sendLocation") val message: MessageDto)
+
+// -- Servers (guilds) --------------------------------------------------------
+
+@Serializable
+data class GuildDto(
+    val id: String,
+    val name: String,
+    val iconKey: String? = null,
+    /** Presigned and short-lived. Cache against [iconKey], never against this. */
+    val iconUrl: String? = null,
+    val description: String? = null,
+    val ownerId: String,
+    val channels: List<ChannelDto> = emptyList(),
+    val roles: List<RoleDto> = emptyList(),
+    val me: GuildMemberDto? = null,
+    /** 128-bit bitfield as a decimal string. Never parse it into a number. */
+    val myPermissions: String = "0",
+) {
+    /** Two letters is what fits a 48dp rail tile; one reads as an accident. */
+    val initials: String get() = name.trim()
+        .split(Regex("\\s+"))
+        .take(2)
+        .mapNotNull { it.firstOrNull()?.uppercase() }
+        .joinToString("")
+        .ifEmpty { "?" }
+}
+
+@Serializable
+data class RoleDto(
+    val id: String,
+    val name: String,
+    val color: Int? = null,
+    val position: Int = 0,
+    val permissions: String = "0",
+    val hoist: Boolean = false,
+    val mentionable: Boolean = false,
+    val isDefault: Boolean = false,
+)
+
+@Serializable
+data class GuildMemberDto(
+    val guildId: String,
+    val user: UserDto,
+    val nickname: String? = null,
+    /** Nickname, else display name, else username. Resolved server-side so clients agree. */
+    val displayName: String,
+    val roles: List<RoleDto> = emptyList(),
+)
+
+@Serializable
+data class InviteDto(
+    val code: String,
+    val guildId: String,
+    val uses: Int = 0,
+    val maxUses: Int? = null,
+)
+
+@Serializable data class GuildsData(val guilds: List<GuildDto>)
+@Serializable data class GuildData(val guild: GuildDto? = null)
+@Serializable data class CreateGuildData(@SerialName("createGuild") val guild: GuildDto)
+@Serializable data class UpdateGuildData(@SerialName("updateGuild") val guild: GuildDto)
+@Serializable data class InvitesData(val invites: List<InviteDto>)
+@Serializable data class RedeemInviteData(@SerialName("redeemInvite") val guild: GuildDto)
+@Serializable data class CreateInviteData(@SerialName("createInvite") val invite: InviteDto)
+@Serializable data class GuildMembersData(val guildMembers: List<GuildMemberDto>)
+@Serializable data class CreateGuildChannelData(@SerialName("createGuildChannel") val channel: ChannelDto)

@@ -55,6 +55,8 @@ data class Channel(
     val iconKey: String?,
     val ownerId: Long?,
     val lastMessageId: Long?,
+    /** The GUILD_CATEGORY channel this one sits under, or null. Always null for DMs. */
+    val parentId: Long?,
     val createdAt: Instant,
 )
 

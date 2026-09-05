@@ -6,6 +6,7 @@ import io.lettuce.core.pubsub.StatefulRedisPubSubConnection
 import org.slf4j.LoggerFactory
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.context.annotation.Primary
 
 /**
  * Valkey (Redis-compatible) wiring.
@@ -54,8 +55,20 @@ class ValkeyConfig(private val props: SingularProperties) {
         return client
     }
 
-    /** Commands connection for shared volatile state. Blocking API is fine on virtual threads. */
+    /**
+     * Commands connection for shared volatile state. Blocking API is fine on virtual threads.
+     *
+     * `@Primary` is required, not decorative. `StatefulRedisPubSubConnection` *extends*
+     * `StatefulRedisConnection`, so both beans below satisfy an unqualified injection of the
+     * plain type and Spring refuses to start with "expected single matching bean but found 2".
+     *
+     * Marking this one primary also picks the right default. A Lettuce pub/sub connection
+     * cannot run ordinary commands once it is subscribed, so a consumer that wanted commands
+     * and silently received the pub/sub connection would fail at runtime, under load, rather
+     * than at wiring time. Anything genuinely wanting pub/sub asks for the concrete subtype.
+     */
     @Bean(destroyMethod = "close")
+    @Primary
     fun commands(client: RedisClient): io.lettuce.core.api.StatefulRedisConnection<String, String> =
         client.connect()
 

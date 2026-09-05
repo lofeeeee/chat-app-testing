@@ -47,6 +47,9 @@ class SocialController(
     private val social: SocialRepository,
     private val presence: PresenceService,
     private val users: UserRepository,
+    private val userService: app.singular.user.UserService,
+    private val attachments: app.singular.media.AttachmentRepository,
+    private val media: app.singular.media.MediaService,
 ) {
 
     // -- Presence ------------------------------------------------------------
@@ -169,6 +172,31 @@ class SocialController(
         "BUBBLES" -> 0
         "COMPACT" -> 1
         else -> throw InvalidInput("Unknown layout: $name")
+    }
+
+    @MutationMapping
+    fun changeUsername(@Argument username: String, ctx: GraphQLContext): User =
+        userService.changeUsername(ctx.requirePrincipal().userId, username)
+
+    /**
+     * A signed URL for the avatar.
+     *
+     * `avatar_key` holds an attachment id rather than a raw object key, so a profile picture
+     * goes through the same pipeline as anything else off a user's disk — EXIF stripped,
+     * thumbnailed, size-checked. The indirection is what makes that reuse possible.
+     *
+     * The **thumbnail** is preferred here, not the original: an avatar is drawn at 32-64px in
+     * a list of dozens, and serving the full-size upload for each would move megabytes to
+     * render a few hundred pixels.
+     *
+     * Null for a missing or still-uploading picture, rather than a broken link.
+     */
+    @SchemaMapping(typeName = "User", field = "avatarUrl")
+    fun avatarUrl(user: User): String? {
+        val attachmentId = user.avatarKey?.toLongOrNull() ?: return null
+        val attachment = attachments.find(attachmentId) ?: return null
+        if (attachment.status != app.singular.media.AttachmentStatus.READY) return null
+        return media.downloadUrl(attachment.thumbnailKey ?: attachment.objectKey)
     }
 
     @MutationMapping

@@ -89,6 +89,65 @@ class UserRepository(private val jdbc: JdbcClient) {
         return rows == 1
     }
 
+    /**
+     * Attempts one `(username, discriminator)` pair for an existing account.
+     *
+     * The mirror of [tryInsert]: false means the pair is taken, and the caller draws another.
+     *
+     * The `NOT EXISTS` guard is doing real work and is **not** the same as a check-then-write.
+     * An INSERT can say "give up quietly" with `ON CONFLICT DO NOTHING`; an UPDATE has no such
+     * clause, so hitting `ux_users_handle` raises a `DuplicateKeyException` — which does not
+     * merely fail this attempt, it poisons the surrounding transaction, so the fallback that
+     * was supposed to pick a different number can never run. Guarding in the statement turns a
+     * contested pair into "0 rows updated", which is the answer the caller is written for.
+     *
+     * The unique index is still the final arbiter. Two people renaming onto the same pair in
+     * the same instant can both pass the guard and one will lose to the index — surfacing as a
+     * failed request they can retry, never as two accounts sharing a handle.
+     */
+    fun tryRename(userId: Long, username: String, discriminator: Short): Boolean {
+        val rows = jdbc
+            .sql(
+                """
+                UPDATE users SET username = :username, discriminator = :disc
+                WHERE id = :id
+                  AND deleted_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM users other
+                      WHERE lower(other.username) = lower(:username)
+                        AND other.discriminator = :disc
+                        AND other.id <> :id
+                  )
+                """
+            )
+            .param("username", username)
+            .param("disc", discriminator.toInt())
+            .param("id", userId)
+            .update()
+        return rows == 1
+    }
+
+    /**
+     * Marks a handle as recently released, so nobody else can take it for a while.
+     *
+     * `released_by` is recorded because the window is aimed at impersonators, not at the
+     * person who left — see [quarantinedDiscriminators].
+     */
+    fun quarantine(username: String, discriminator: Short, releasedBy: Long) {
+        jdbc.sql(
+            """
+            INSERT INTO handle_quarantine (username_lower, discriminator, released_by, released_at)
+            VALUES (lower(:u), :d, :by, now())
+            ON CONFLICT (username_lower, discriminator)
+            DO UPDATE SET released_by = :by, released_at = now()
+            """
+        )
+            .param("u", username)
+            .param("d", discriminator.toInt())
+            .param("by", releasedBy)
+            .update()
+    }
+
     /** Every discriminator currently in use for this username. At most 9,999 smallints. */
     fun takenDiscriminators(username: String): Set<Short> = jdbc
         .sql("SELECT discriminator FROM users WHERE lower(username) = lower(:u)")
@@ -103,16 +162,28 @@ class UserRepository(private val jdbc: JdbcClient) {
      * Without this, someone watching for a rename can grab the freed handle immediately and
      * impersonate its previous owner — the failure mode that eventually killed the scheme at
      * Discord.
+     *
+     * [exceptUserId] exempts the person who released it. The window exists to stop *other*
+     * people taking your old handle; locking you out of your own name for a month would be an
+     * accident of the mechanism, not the point of it — and it is the difference between
+     * "renaming back gives you your number if it's still free" and "renaming back never does".
      */
-    fun quarantinedDiscriminators(username: String, since: Instant): Set<Short> = jdbc
+    fun quarantinedDiscriminators(
+        username: String,
+        since: Instant,
+        exceptUserId: Long? = null,
+    ): Set<Short> = jdbc
         .sql(
             """
             SELECT discriminator FROM handle_quarantine
-            WHERE username_lower = lower(:u) AND released_at > :since
+            WHERE username_lower = lower(:u)
+              AND released_at > :since
+              AND (:except IS NULL OR released_by <> :except)
             """
         )
         .param("u", username)
         .param("since", java.sql.Timestamp.from(since))
+        .param("except", exceptUserId)
         .query(Short::class.java)
         .list()
         .toSet()

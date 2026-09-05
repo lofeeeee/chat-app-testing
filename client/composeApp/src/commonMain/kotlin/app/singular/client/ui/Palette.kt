@@ -155,8 +155,135 @@ object Presets {
         ),
     )
 
-    /** Shipped order — the order the picker shows them in. */
-    val all = listOf(Ember, Cocoa, Sage, Dusk, Slate)
+    val Midnight = ThemePreset(
+        id = "MIDNIGHT",
+        name = "Midnight",
+        blurb = "Deep navy, cyan accent",
+        dark = Neutrals.Navy,
+        light = Neutrals.CoolPaper,
+        darkAccent = Accent(
+            accent = Color(0xFF5FD3D8),
+            onAccent = Color(0xFF04222A),
+            accentSoft = Color(0xFF93E3E6),
+            danger = Color(0xFFF07B7B),
+            canvasTint = Color(0x162A7FA8),
+        ),
+        lightAccent = Accent(
+            accent = Color(0xFF116B77),
+            onAccent = Color(0xFFF0FDFF),
+            accentSoft = Color(0xFF0C555F),
+            danger = Color(0xFFB4322C),
+            canvasTint = Color(0x0C2A7FA8),
+        ),
+    )
+
+    val Carbon = ThemePreset(
+        id = "CARBON",
+        name = "Carbon",
+        blurb = "Neutral graphite, no cast at all",
+        dark = Neutrals.Graphite,
+        light = Neutrals.CoolPaper,
+        // The one preset with a deliberately colourless accent. Every other theme here has a
+        // hue; someone who wants none should not have to pick the least offensive one.
+        darkAccent = Accent(
+            accent = Color(0xFFD6D9DD),
+            onAccent = Color(0xFF16181B),
+            accentSoft = Color(0xFFC3C7CC),
+            danger = Color(0xFFEF7A76),
+            canvasTint = Color(0x00000000),
+        ),
+        lightAccent = Accent(
+            accent = Color(0xFF3A3F45),
+            onAccent = Color(0xFFF7F8FA),
+            accentSoft = Color(0xFF2D3238),
+            danger = Color(0xFFB1352E),
+            canvasTint = Color(0x00000000),
+        ),
+    )
+
+    val Wine = ThemePreset(
+        id = "WINE",
+        name = "Wine",
+        blurb = "Dark burgundy, soft crimson accent",
+        dark = Neutrals.Burgundy,
+        light = Neutrals.WarmPaper,
+        darkAccent = Accent(
+            accent = Color(0xFFE58898),
+            onAccent = Color(0xFF2E0912),
+            accentSoft = Color(0xFFF0AEB8),
+            danger = Color(0xFFF4767E),
+            canvasTint = Color(0x18B0304C),
+        ),
+        lightAccent = Accent(
+            accent = Color(0xFF9C2F4B),
+            onAccent = Color(0xFFFFF4F6),
+            accentSoft = Color(0xFF7C2039),
+            danger = Color(0xFFB3302A),
+            canvasTint = Color(0x0CB0304C),
+        ),
+    )
+
+    /**
+     * Light-first presets.
+     *
+     * They still author a dark half — the mode switch has to work from anywhere, and a preset
+     * that only looked right in one mode would be a trap. What makes them "light-first" is that
+     * the light side is where they were designed and where their character lives.
+     */
+    val Paper = ThemePreset(
+        id = "PAPER",
+        name = "Paper",
+        blurb = "Warm paper, ink accent — designed light",
+        dark = Neutrals.DarkCharcoal,
+        light = Neutrals.WarmPaper,
+        darkAccent = Accent(
+            accent = Color(0xFFDCCFBB),
+            onAccent = Color(0xFF1E1913),
+            accentSoft = Color(0xFFCDBFA9),
+            danger = Color(0xFFF07A73),
+            canvasTint = Color(0x0EC9A87A),
+        ),
+        lightAccent = Accent(
+            accent = Color(0xFF3B342A),
+            onAccent = Color(0xFFFBF8F2),
+            accentSoft = Color(0xFF2C261E),
+            danger = Color(0xFFB0362C),
+            canvasTint = Color(0x00000000),
+        ),
+    )
+
+    val Frost = ThemePreset(
+        id = "FROST",
+        name = "Frost",
+        blurb = "Cool white, glacier blue — designed light",
+        dark = Neutrals.CoolCharcoal,
+        light = Neutrals.CoolPaper,
+        darkAccent = Accent(
+            accent = Color(0xFF9CC7EE),
+            onAccent = Color(0xFF0B1A28),
+            accentSoft = Color(0xFFBBDAF6),
+            danger = Color(0xFFF07C79),
+            canvasTint = Color(0x123E7BC4),
+        ),
+        lightAccent = Accent(
+            accent = Color(0xFF2F6091),
+            onAccent = Color(0xFFF3F8FE),
+            accentSoft = Color(0xFF24496E),
+            danger = Color(0xFFAF352D),
+            canvasTint = Color(0x0A4C8FD0),
+        ),
+    )
+
+    /**
+     * Shipped order — the order the picker shows them in.
+     *
+     * Dark-designed presets first, light-designed last, because that is the split most people
+     * are choosing between and grouping it is cheaper than labelling it.
+     */
+    val all = listOf(Ember, Cocoa, Sage, Dusk, Slate, Midnight, Carbon, Wine, Paper, Frost)
+
+    /** The presets whose character lives in light mode. Used to caption the picker. */
+    val lightFirst = setOf(Paper.id, Frost.id)
 
     val default: ThemePreset get() = Ember
 
@@ -276,6 +403,75 @@ data class Neutrals(
             line = Color(0xFF28303A),
             lineStrong = Color(0xFF445062),
             notch = Color(0xFF161A20),
+        )
+
+        val Navy = DarkCharcoal.copy(
+            canvas = Color(0xFF0B1220),
+            surface = Color(0xFF111A2B),
+            raised = Color(0xFF1A2639),
+            sunken = Color(0xFF080D18),
+            text = Color(0xFFE6EDF7),
+            textMuted = Color(0xFF9FAFC6),
+            textFaint = Color(0xFF6C7D95),
+            line = Color(0xFF1F2C41),
+            lineStrong = Color(0xFF3B4E6C),
+            notch = Color(0xFF111A2B),
+        )
+
+        /**
+         * A true neutral, with the hue deliberately at zero.
+         *
+         * Every other dark family here carries a cast, because a cast is what stops a dark
+         * canvas reading as dead. This one is for people who read that as noise — so it
+         * compensates with a slightly wider lightness spread between levels instead, which is
+         * the only tool left for showing elevation once hue is off the table.
+         */
+        val Graphite = DarkCharcoal.copy(
+            canvas = Color(0xFF0E0F11),
+            surface = Color(0xFF17191C),
+            raised = Color(0xFF24272B),
+            sunken = Color(0xFF08090A),
+            text = Color(0xFFECEEF1),
+            textMuted = Color(0xFFA6ABB2),
+            textFaint = Color(0xFF737981),
+            line = Color(0xFF262A2F),
+            lineStrong = Color(0xFF474D55),
+            notch = Color(0xFF17191C),
+        )
+
+        val Burgundy = DarkCharcoal.copy(
+            canvas = Color(0xFF170D11),
+            surface = Color(0xFF20131A),
+            raised = Color(0xFF2D1B24),
+            sunken = Color(0xFF120A0D),
+            text = Color(0xFFF7EAEE),
+            textMuted = Color(0xFFBCA3AC),
+            textFaint = Color(0xFF876E77),
+            line = Color(0xFF37222C),
+            lineStrong = Color(0xFF5E3A48),
+            notch = Color(0xFF20131A),
+        )
+
+        /**
+         * The cool light side — for the presets whose accent is blue, cyan or colourless.
+         *
+         * A second light family rather than a fifth reason to reuse [WarmPaper]. The note there
+         * about light-mode tints reading as stain is still true, and this is not a tinted
+         * paper: it is a *neutral* paper on the cool side of grey, so a glacier-blue accent
+         * doesn't sit on a background that is quietly fighting it. Two authored papers is a
+         * different thing from ten tinted ones.
+         */
+        val CoolPaper = Neutrals(
+            canvas = Color(0xFFF2F4F7),
+            surface = Color(0xFFFFFFFF),
+            raised = Color(0xFFE7EBF0),
+            sunken = Color(0xFFE3E8EE),
+            text = Color(0xFF161A1F),
+            textMuted = Color(0xFF5C646E),
+            textFaint = Color(0xFF7E8792),
+            line = Color(0xFFDCE1E8),
+            lineStrong = Color(0xFFA8B2BE),
+            notch = Color(0xFFFFFFFF),
         )
 
         /**

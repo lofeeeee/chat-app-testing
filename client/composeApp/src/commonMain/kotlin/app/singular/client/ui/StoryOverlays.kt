@@ -2,10 +2,12 @@ package app.singular.client.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,11 +25,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.serialization.json.Json
@@ -51,6 +58,12 @@ data class StoryOverlay(
     val value: String? = null,
     val style: String? = null,
     val color: String? = null,
+    /** `sans`, `serif`, `mono` or `cursive`. Resolved by [storyFontFamily]. */
+    val font: String? = null,
+    /** Type size in sp. Absolute, not a multiplier — see [StoryText]. */
+    val size: Float? = null,
+    /** `start`, `center` or `end`. */
+    val align: String? = null,
     // Music widget (feature 20)
     val title: String? = null,
     val artist: String? = null,
@@ -81,6 +94,9 @@ fun parseOverlays(json: String): List<StoryOverlay> = runCatching {
                 value = obj["value"]?.jsonPrimitive?.content,
                 style = obj["style"]?.jsonPrimitive?.content,
                 color = obj["color"]?.jsonPrimitive?.content,
+                font = obj["font"]?.jsonPrimitive?.content,
+                size = obj["size"]?.jsonPrimitive?.content?.toFloatOrNull(),
+                align = obj["align"]?.jsonPrimitive?.content,
                 title = obj["title"]?.jsonPrimitive?.content,
                 artist = obj["artist"]?.jsonPrimitive?.content,
             )
@@ -100,6 +116,9 @@ fun encodeOverlays(overlays: List<StoryOverlay>): String =
             o.value?.let { append(",\"value\":\"").append(escape(it)).append("\"") }
             o.style?.let { append(",\"style\":\"").append(escape(it)).append("\"") }
             o.color?.let { append(",\"color\":\"").append(escape(it)).append("\"") }
+            o.font?.let { append(",\"font\":\"").append(escape(it)).append("\"") }
+            o.size?.let { append(",\"size\":").append(it) }
+            o.align?.let { append(",\"align\":\"").append(escape(it)).append("\"") }
             o.title?.let { append(",\"title\":\"").append(escape(it)).append("\"") }
             o.artist?.let { append(",\"artist\":\"").append(escape(it)).append("\"") }
             append("}")
@@ -125,62 +144,203 @@ fun StoryOverlayCanvas(overlays: List<StoryOverlay>, modifier: Modifier = Modifi
         val frameWidth = maxWidth
         val frameHeight = maxHeight
 
+        // Two positioning models, because text and objects want different things.
+        //
+        // **Text flows in bands.** A text element occupies a full-width strip at its `y` and
+        // aligns itself inside that strip. This is how story text actually behaves, and it
+        // sidesteps a real problem with point-placement: an offset puts an element's *corner*
+        // at (x, y), so centring a run of text would need its measured width, which isn't
+        // known until after layout. Bands make "centred" exact at any frame size and any
+        // string length.
+        //
+        // **Objects sit at points.** A sticker someone dragged somewhere has a position, not
+        // an alignment, so those keep the fractional offset.
         overlays.forEach { overlay ->
-            Box(
-                Modifier
-                    .offset(
-                        x = frameWidth * overlay.x.coerceIn(0f, 1f),
-                        y = frameHeight * overlay.y.coerceIn(0f, 1f),
-                    )
-                    // Rotate before scaling so a tilted sticker grows along its own axis
-                    // rather than shearing.
-                    .rotate(overlay.rotation)
-                    .scale(overlay.scale.coerceIn(0.3f, 4f)),
-            ) {
-                when (overlay.type) {
-                    "text" -> TextOverlay(overlay)
-                    "sticker", "emoji" -> StickerOverlay(overlay)
-                    "music" -> MusicOverlay(overlay)
-                    "mention" -> MentionOverlay(overlay)
-                    "location" -> LocationOverlay(overlay)
-                    // Unknown type from a newer client: skipped silently. Drawing a
-                    // placeholder box would be worse than the sticker simply not appearing.
-                    else -> Unit
+            when (overlay.type) {
+                "caption" -> CaptionOverlay(overlay)
+
+                "text" -> Box(
+                    Modifier
+                        .offset(y = frameHeight * overlay.y.coerceIn(0f, 1f))
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .rotate(overlay.rotation),
+                    contentAlignment = when (overlay.align) {
+                        "start" -> Alignment.CenterStart
+                        "end" -> Alignment.CenterEnd
+                        else -> Alignment.Center
+                    },
+                ) { TextOverlay(overlay) }
+
+                else -> Box(
+                    Modifier
+                        .offset(
+                            x = frameWidth * overlay.x.coerceIn(0f, 1f),
+                            y = frameHeight * overlay.y.coerceIn(0f, 1f),
+                        )
+                        // Rotate before scaling so a tilted sticker grows along its own axis
+                        // rather than shearing.
+                        .rotate(overlay.rotation)
+                        .scale(overlay.scale.coerceIn(0.3f, 4f)),
+                ) {
+                    when (overlay.type) {
+                        "sticker", "emoji" -> StickerOverlay(overlay)
+                        "music" -> MusicOverlay(overlay)
+                        "mention" -> MentionOverlay(overlay)
+                        "location" -> LocationOverlay(overlay)
+                        // Unknown type from a newer client: skipped silently. Drawing a
+                        // placeholder box would be worse than the sticker simply not
+                        // appearing.
+                        else -> Unit
+                    }
                 }
             }
         }
     }
 }
 
+/**
+ * The font families a story can use.
+ *
+ * Only the four families every platform already has. Shipping a font file would be the obvious
+ * alternative and it is the wrong one here: the project vendors everything offline, and a
+ * bundled face costs megabytes in the jar for a choice most people make once. Unknown names
+ * fall back to sans rather than throwing — same forward-compatibility contract as everything
+ * else that crosses the wire as a string.
+ */
+fun storyFontFamily(name: String?): FontFamily = when (name) {
+    "serif" -> FontFamily.Serif
+    "mono" -> FontFamily.Monospace
+    "cursive" -> FontFamily.Cursive
+    else -> FontFamily.SansSerif
+}
+
+/** The four names, in picker order, with labels. */
+val StoryFonts: List<Pair<String, String>> = listOf(
+    "sans" to "Sans",
+    "serif" to "Serif",
+    "mono" to "Mono",
+    "cursive" to "Script",
+)
+
+/**
+ * The caption, WhatsApp-style: centred, low in the frame, on a barely-there dark scrim.
+ *
+ * Deliberately the one overlay type that ignores `x`/`y`. A caption is not a sticker someone
+ * placed — it is the frame's own furniture, and it has to sit in the same spot on a portrait
+ * phone photo and a wide desktop screenshot. Positioning it fractionally like the others is
+ * what pushed it off-centre and into the middle of the picture at different aspect ratios.
+ *
+ * The scrim is near-transparent rather than a solid plate: enough to hold white text over a
+ * bright photo, not enough to hide what is behind it — which is the whole balance a caption
+ * has to strike. It also spans the full width so the band reads as a deliberate edge rather
+ * than a box floating in the middle of the image.
+ */
+@Composable
+private fun BoxScope.CaptionOverlay(overlay: StoryOverlay) {
+    val text = overlay.value.orEmpty()
+    if (text.isBlank()) return
+
+    Box(
+        Modifier
+            .align(Alignment.BottomCenter)
+            .fillMaxWidth()
+            // Clear of the very bottom edge, where a viewer's own controls sit.
+            .padding(bottom = 28.dp)
+            .background(Color.Black.copy(alpha = 0.28f))
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            color = parseHexColor(overlay.color) ?: Color.White,
+            fontFamily = storyFontFamily(overlay.font),
+            fontSize = (overlay.size ?: 17f).coerceIn(10f, 40f).sp,
+            fontWeight = FontWeight.Medium,
+            textAlign = when (overlay.align) {
+                "start" -> TextAlign.Start
+                "end" -> TextAlign.End
+                else -> TextAlign.Center
+            },
+            maxLines = 4,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 @Composable
 private fun TextOverlay(overlay: StoryOverlay) {
     val text = overlay.value.orEmpty()
+    if (text.isBlank()) return
+
     val tint = parseHexColor(overlay.color) ?: Color.White
+    val alignment = when (overlay.align) {
+        "start" -> TextAlign.Start
+        "end" -> TextAlign.End
+        else -> TextAlign.Center
+    }
 
     when (overlay.style) {
         // A filled plate behind the words, so light text stays readable over a bright photo.
-        "plate" -> Text(
-            text,
+        // The plate takes the chosen colour and the text flips to whichever of black or white
+        // survives on it — picking the fill and the ink separately is how you get white on
+        // yellow.
+        "plate" -> StoryText(
+            overlay = overlay,
+            text = text,
             color = if (tint.luminanceIsLight()) Color.Black else Color.White,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center,
+            align = alignment,
             modifier = Modifier
-                .widthIn(max = 260.dp)
                 .clip(RoundedCornerShape(6.dp))
                 .background(tint)
                 .padding(horizontal = 10.dp, vertical = 5.dp),
         )
 
-        else -> Text(
-            text,
+        // A shadow rather than a plate: enough to survive a busy photo without boxing the
+        // words in. Plain text over an unknown image is otherwise a coin toss.
+        else -> StoryText(
+            overlay = overlay,
+            text = text,
             color = tint,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.widthIn(max = 260.dp),
+            align = alignment,
+            shadow = true,
         )
     }
+}
+
+/**
+ * One run of story text, with the author's font, size and alignment applied.
+ *
+ * Size is stored in **sp and absolute**, not as a multiplier of a base. A multiplier reads
+ * fine until two stories composed on differently sized screens are viewed side by side and the
+ * "same" size renders differently; an absolute value is the same everywhere, which is the
+ * whole promise of compositing overlays at view time instead of baking them in.
+ */
+@Composable
+private fun StoryText(
+    overlay: StoryOverlay,
+    text: String,
+    color: Color,
+    align: TextAlign,
+    modifier: Modifier = Modifier,
+    shadow: Boolean = false,
+) {
+    Text(
+        text,
+        color = color,
+        fontFamily = storyFontFamily(overlay.font),
+        fontSize = (overlay.size ?: 22f).coerceIn(10f, 72f).sp,
+        fontWeight = FontWeight.Bold,
+        textAlign = align,
+        style = if (!shadow) LocalTextStyle.current else LocalTextStyle.current.copy(
+            shadow = Shadow(
+                color = Color.Black.copy(alpha = 0.55f),
+                offset = Offset(0f, 2f),
+                blurRadius = 8f,
+            )
+        ),
+        modifier = modifier,
+    )
 }
 
 @Composable

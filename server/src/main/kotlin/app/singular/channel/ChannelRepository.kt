@@ -20,7 +20,7 @@ class ChannelRepository(private val jdbc: JdbcClient) {
         .sql(
             """
             SELECT c.id, c.guild_id, c.type, c.name, c.icon_key, c.owner_id,
-                   c.last_message_id, c.created_at
+                   c.last_message_id, c.parent_id, c.created_at
             FROM channels c
             JOIN channel_members m ON m.channel_id = c.id
             WHERE m.user_id = :userId AND c.deleted_at IS NULL
@@ -117,7 +117,8 @@ class ChannelRepository(private val jdbc: JdbcClient) {
     fun channelsInGuild(guildId: Long): List<Channel> = jdbc
         .sql(
             """
-            SELECT id, guild_id, type, name, icon_key, owner_id, last_message_id, created_at
+            SELECT id, guild_id, type, name, icon_key, owner_id, last_message_id, parent_id,
+                   created_at
             FROM channels
             WHERE guild_id = :g AND deleted_at IS NULL
             ORDER BY position, id
@@ -192,7 +193,8 @@ class ChannelRepository(private val jdbc: JdbcClient) {
 
     private companion object {
         const val SELECT_COLS = """
-            SELECT id, guild_id, type, name, icon_key, owner_id, last_message_id, created_at
+            SELECT id, guild_id, type, name, icon_key, owner_id, last_message_id, parent_id,
+                   created_at
             FROM channels
         """
 
@@ -204,6 +206,7 @@ class ChannelRepository(private val jdbc: JdbcClient) {
             iconKey = rs.getString("icon_key"),
             ownerId = rs.getObject("owner_id") as Long?,
             lastMessageId = rs.getObject("last_message_id") as Long?,
+            parentId = rs.getObject("parent_id") as Long?,
             createdAt = rs.getTimestamp("created_at").toInstant(),
         )
     }
