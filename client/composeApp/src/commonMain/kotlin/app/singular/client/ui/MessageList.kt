@@ -9,7 +9,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -32,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -168,8 +172,16 @@ class MentionResolver(
     private val rolesById: Map<String, String>,
     private val channelsById: Map<String, String>,
     private val selfId: String?,
+    /** Roles the viewer holds here, so a `<@&id>` aimed at one of them counts as aimed at them. */
+    private val myRoleIds: Set<String> = emptySet(),
 ) {
-    val revision: Int = usersById.hashCode() * 31 + rolesById.hashCode()
+    val revision: Int =
+        usersById.hashCode() * 31 + rolesById.hashCode() * 31 + myRoleIds.hashCode()
+
+    private companion object {
+        /** Mirrors the server's anchoring so client and server agree on what pings you. */
+        val BROADCAST_PATTERN = Regex("""(^|\s)@(everyone|here)\b""")
+    }
 
     fun displayFor(wire: String): String = when {
         wire.startsWith("<@&") -> "@" + (rolesById[wire.removePrefix("<@&").removeSuffix(">")] ?: "role")
@@ -186,14 +198,29 @@ class MentionResolver(
         else -> wire
     }
 
-    /** Whether any user mention in this content points at me — drives the "you were tagged" tint. */
+    /**
+     * Whether this message is addressed to me — drives the "you were tagged" row highlight.
+     *
+     * Three ways to be addressed: by name, by a role you hold, or by `@everyone`/`@here`.
+     * Missing the role case would mean the highlight disagrees with the notification the
+     * server already sent you, which is worse than not highlighting at all.
+     *
+     * The two literals are matched with the **same word-boundary anchoring the server's
+     * MentionParser uses**. An unanchored `contains` lights up every message containing an
+     * address like `sales@everyone.example`, and a highlight that fires on things that aren't
+     * mentions is one people learn to ignore.
+     */
     fun mentionsMe(content: String?): Boolean {
         if (content == null) return false
-        return MENTION_PATTERN.findAll(content).any { m ->
+
+        val direct = MENTION_PATTERN.findAll(content).any { m ->
+            val isRole = m.value.startsWith("<@&")
+            val isUser = m.value.startsWith("<@") && !isRole
             val id = m.groupValues[1].ifEmpty { m.groupValues[2] }
-            val isUser = m.value.startsWith("<@") && !m.value.startsWith("<@&")
-            isUser && id == selfId
-        } || content.contains("@everyone") || content.contains("@here")
+            (isUser && id == selfId) || (isRole && id in myRoleIds)
+        }
+
+        return direct || BROADCAST_PATTERN.containsMatchIn(content)
     }
 }
 
@@ -349,15 +376,33 @@ private fun BubbleRow(
 ) {
     val message = row.message
 
+    // The same "you were tagged" treatment as the compact layout: a wash across the whole row
+    // and a bar down the left edge. It was previously a 3dp bar *inside* the bubble, which
+    // drew on top of the first character of the message and vanished entirely on your own
+    // messages, where the bubble is already accent-coloured.
+    val mentioned = resolver.mentionsMe(message.content)
+    val accent = LocalSingularColors.current.accentSoft
+
     Row(
-        Modifier.fillMaxWidth(),
+        Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min)
+            .background(if (mentioned) accent.copy(alpha = 0.10f) else Color.Transparent)
+            .padding(vertical = 1.dp),
         horizontalArrangement = if (row.mine) Arrangement.End else Arrangement.Start,
     ) {
+        if (mentioned) {
+            Box(Modifier.width(3.dp).fillMaxHeight().background(accent))
+            Spacer(Modifier.width(9.dp))
+        } else {
+            Spacer(Modifier.width(12.dp))
+        }
+
         // Avatar only on the last message of an incoming run, so it sits beside the tail of the
         // bubble stack the way a speaker's portrait does. A blank keeps the column aligned.
         if (!row.mine) {
             if (row.endsGroup) {
-                Avatar(message.author.id, message.author.label, size = 28)
+                Avatar(message.author, size = 28)
             } else {
                 Spacer(Modifier.size(28.dp))
             }
@@ -419,9 +464,6 @@ private fun Bubble(
         if (row.mine) MaterialTheme.colorScheme.onPrimary
         else MaterialTheme.colorScheme.onSurfaceVariant
 
-    // A message that mentions me gets an accent bar — WhatsApp's "you were tagged" affordance.
-    val mentioned = resolver.mentionsMe(message.content)
-
     Box(
         Modifier
             .clip(shape)
@@ -429,31 +471,27 @@ private fun Bubble(
             .combinedClickable(onClick = {}, onLongClick = { onMessageLongPress(message) })
             .padding(horizontal = 12.dp, vertical = 7.dp)
     ) {
-        if (mentioned) {
-            Box(
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .size(3.dp, 20.dp)
-                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp))
-            )
-        }
         if (message.authorBlocked && !revealed) {
             TextButton(onClick = { revealed = true }) { Text("Blocked message — show") }
         } else {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 MessageBody(message, foreground, resolver) { emoji ->
                     onReact(message.id, emoji)
                 }
 
-                // Time inside the bubble, trailing the text. An attachment-only message still
-                // needs the timestamp, so the row renders even with no body.
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    Text(
-                        shortTime(message.createdAt),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = foreground.copy(alpha = 0.65f),
-                    )
-                }
+                // Time inside the bubble, trailing the text.
+                //
+                // `align(End)` on the text, NOT a `fillMaxWidth()` row around it. That row was
+                // why every bubble was the same enormous width: filling the width forced the
+                // Column — and so the bubble — out to the 520dp maximum no matter how short
+                // the message, which is exactly the "bubbles are too big" problem. Aligning a
+                // wrap-content child leaves the bubble sized to its longest line.
+                Text(
+                    shortTime(message.createdAt),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = foreground.copy(alpha = 0.65f),
+                    modifier = Modifier.align(Alignment.End),
+                )
             }
         }
     }
@@ -474,11 +512,45 @@ private fun CompactRow(
     val message = row.message
     var revealed by remember(message.id) { mutableStateOf(false) }
 
-    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), verticalAlignment = Alignment.Top) {
+    // Discord's "you were pinged" treatment: the whole row gets a wash of the accent and a
+    // solid bar down the left edge. The bar matters as much as the tint — a tint alone is a
+    // colour difference, which is exactly what someone with a colour-vision deficiency will
+    // miss while scrolling past the one message that was actually addressed to them.
+    val mentioned = resolver.mentionsMe(message.content)
+    val accent = LocalSingularColors.current.accentSoft
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            // IntrinsicSize.Min so the accent bar's fillMaxHeight resolves against this row's
+            // own height. Without it, a Row is wrap-content and fillMaxHeight would take the
+            // incoming maximum — the height of the whole viewport, not of the message.
+            .height(IntrinsicSize.Min)
+            .background(
+                if (mentioned) accent.copy(alpha = 0.10f)
+                else Color.Transparent
+            )
+            .padding(vertical = 1.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        if (mentioned) {
+            Box(
+                Modifier
+                    .width(3.dp)
+                    .fillMaxHeight()
+                    .background(accent)
+            )
+            Spacer(Modifier.width(9.dp))
+        } else {
+            // The same 12dp gutter either way, so a highlighted row doesn't shunt the avatar
+            // column sideways and break the alignment of the whole list.
+            Spacer(Modifier.width(12.dp))
+        }
+
         // Avatar on the first of a run only. Continuation lines get a blank gutter of the same
         // width, which is what keeps the text edges aligned down the whole column.
         if (row.startsGroup) {
-            Avatar(message.author.id, message.author.label, size = 36)
+            Avatar(message.author, size = 36)
         } else {
             Spacer(Modifier.size(36.dp))
         }
@@ -521,6 +593,32 @@ private fun CompactRow(
     }
 }
 
+@Composable
+internal fun Avatar(user: UserDto, size: Int, label: String = user.label) {
+    val url = user.avatarUrl
+    if (url == null) {
+        Avatar(user.id, label, size)
+        return
+    }
+
+    RemoteImage(
+        url = url,
+        // The key, never the URL. Avatar URLs are presigned and carry a fresh signature on
+        // every fetch, so keying the cache on them would miss every time and re-download the
+        // same face for every row in a busy channel.
+        stableKey = user.avatarKey ?: user.id,
+        contentDescription = label,
+        modifier = Modifier.size(size.dp).clip(CircleShape),
+    )
+}
+
+/**
+ * The fallback: a coloured disc with an initial, seeded from the id.
+ *
+ * Kept as its own overload because plenty of things that need an avatar-shaped mark aren't
+ * people — a group conversation, a role in the mention list — and they have no picture to
+ * fetch.
+ */
 @Composable
 internal fun Avatar(seed: String, label: String, size: Int) {
     Box(

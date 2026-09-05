@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -84,6 +85,10 @@ fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
         item {
             RailTile(
                 selected = state.selectedGuild == null,
+                // Home stands for every direct message, so it carries their combined state —
+                // otherwise a DM arriving while you're in a server is invisible from the rail.
+                unread = state.channels.any { state.unread[it.id] == true },
+                mentions = state.channels.sumOf { state.mentionCounts[it.id] ?: 0 },
                 onClick = { state.openGuild(null) },
             ) {
                 Icon(
@@ -109,6 +114,9 @@ fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
         items(state.guilds, key = { it.id }) { guild ->
             RailTile(
                 selected = state.selectedGuild?.id == guild.id,
+                // Rolled up from the server's channels — see AppState.guildHasUnread.
+                unread = state.guildHasUnread(guild),
+                mentions = state.guildMentionCount(guild),
                 onClick = { state.openGuild(guild) },
             ) {
                 val url = guild.iconUrl
@@ -145,46 +153,43 @@ fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
 }
 
 /**
- * One rail tile plus its selection pill.
+ * One rail tile: the icon, the left-edge indicator, and the mention badge.
  *
- * The pill animates its height rather than appearing, which is what makes switching servers
- * read as movement between two places instead of two unrelated redraws.
+ * The indicator height animates rather than appearing, which is what makes switching servers
+ * read as one bar moving between two places instead of two unrelated redraws. See
+ * [RailIndicator] for why the bar rather than a tint carries "unread".
  */
 @Composable
 private fun RailTile(
     selected: Boolean,
+    unread: Boolean = false,
+    mentions: Int = 0,
     onClick: () -> Unit,
     content: @Composable () -> Unit,
 ) {
-    val pillHeight by animateDpAsState(
-        targetValue = if (selected) 28.dp else 0.dp,
-        label = "rail-pill",
-    )
-
     Box(Modifier.fillMaxWidth().height(52.dp), contentAlignment = Alignment.CenterStart) {
-        Box(
-            Modifier
-                .padding(start = 2.dp)
-                .width(3.dp)
-                .height(pillHeight)
-                .clip(RoundedCornerShape(topEnd = 3.dp, bottomEnd = 3.dp))
-                .background(MaterialTheme.colorScheme.primary)
-        )
+        RailIndicator(selected = selected, unread = unread)
 
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            Box(
-                Modifier
-                    .size(44.dp)
-                    // Squircle when selected, circle when not — Discord's tell, and it reads
-                    // even for someone who can't distinguish the pill's colour.
-                    .clip(if (selected) RoundedCornerShape(14.dp) else CircleShape)
-                    .background(
-                        if (selected) MaterialTheme.colorScheme.primaryContainer
-                        else MaterialTheme.colorScheme.surface
-                    )
-                    .clickable(onClick = onClick),
-                contentAlignment = Alignment.Center,
-            ) { content() }
+            Box(contentAlignment = Alignment.BottomEnd) {
+                Box(
+                    Modifier
+                        .size(44.dp)
+                        // Squircle when selected, circle when not — Discord's tell, and it
+                        // reads even for someone who can't distinguish the bar's colour.
+                        .clip(if (selected) RoundedCornerShape(14.dp) else CircleShape)
+                        .background(
+                            if (selected) MaterialTheme.colorScheme.primaryContainer
+                            else MaterialTheme.colorScheme.surface
+                        )
+                        .clickable(onClick = onClick),
+                    contentAlignment = Alignment.Center,
+                ) { content() }
+
+                // Overlapping the tile's corner rather than sitting beside it: the rail is
+                // 72dp wide and a badge that claimed its own column would shrink every icon.
+                MentionBadge(mentions, Modifier.offset(x = 3.dp, y = 3.dp))
+            }
         }
     }
 }
@@ -300,17 +305,10 @@ fun GuildHeader(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            guild.me?.let { me ->
-                Text(
-                    // The per-server nickname if there is one — that is the whole point of it.
-                    me.displayName +
-                        (me.roles.firstOrNull { !it.isDefault }?.let { " · ${it.name}" } ?: ""),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+            // Your own nickname and role used to sit here. Removed: it told you something you
+            // already know, on every server, above every channel list — and the account bar at
+            // the bottom of the same column already says who you are. Your per-server nickname
+            // is still set from Server settings.
         }
 
         Box {
@@ -429,12 +427,5 @@ internal fun NewChannelDialog(
 
 @Composable
 private fun CategoryChoice(label: String, selected: Boolean, onSelect: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onSelect).padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RadioButton(selected = selected, onClick = onSelect)
-        Spacer(Modifier.width(4.dp))
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-    }
+    SettingRadio(title = label, selected = selected, onSelect = onSelect)
 }

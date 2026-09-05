@@ -1,15 +1,21 @@
 package app.singular.client
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
@@ -36,6 +42,14 @@ import app.singular.client.ui.Presets
 fun App(
     httpUrl: String = SingularClient.DEFAULT_HTTP,
     wsUrl: String = SingularClient.DEFAULT_WS,
+    /**
+     * Chrome drawn above everything, inside the theme.
+     *
+     * The desktop's custom title bar comes through here rather than wrapping [App] from the
+     * outside, because a bar outside `SingularTheme` reads Material's defaults instead of the
+     * user's palette — which is the entire reason for replacing the OS one.
+     */
+    titleBar: @Composable () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val client = remember(httpUrl, wsUrl) { SingularClient(httpUrl, wsUrl) }
@@ -58,6 +72,16 @@ fun App(
     var showStories by remember { mutableStateOf(false) }
     var showMentions by remember { mutableStateOf(false) }
     var showShortcuts by remember { mutableStateOf(false) }
+
+    // Restoring the stored session. Starts true so the very first frame is the spinner, not
+    // the login form — the check is a network round trip and would otherwise flash.
+    var restoring by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        // The result is ignored on purpose: success flips `signedIn`, failure leaves it false,
+        // and either way this screen is done waiting.
+        runCatching { state.tryRestoreSession() }
+        restoring = false
+    }
 
     /**
      * Server settings, if open: which server, and which section it opened on.
@@ -137,7 +161,19 @@ fun App(
         legacyPrimary = if (hasPreset) null else state.themePrimary,
         legacySecondary = if (hasPreset) null else state.themeSecondary,
     ) {
-        Surface(Modifier.fillMaxSize()) {
+      Column(Modifier.fillMaxSize()) {
+        titleBar()
+        Surface(Modifier.weight(1f).fillMaxWidth()) {
+            // One attempt to pick up the stored session, before anything is drawn. Holding a
+            // spinner for it rather than showing the login form first is the difference
+            // between "the app remembered me" and a form that flashes up and vanishes.
+            if (restoring) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+                return@Surface
+            }
+
             if (!state.signedIn) {
                 // No shell shortcuts before sign-in: there is nowhere to navigate to, and a
                 // stray Ctrl+D on a login form should do nothing rather than something.
@@ -196,5 +232,6 @@ fun App(
                 }
             }
         }
+      }
     }
 }

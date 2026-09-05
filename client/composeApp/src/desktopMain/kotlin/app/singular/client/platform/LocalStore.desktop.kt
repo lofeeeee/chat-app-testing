@@ -26,15 +26,17 @@ private object LocalStore {
         File(base, FILE_NAME)
     }
 
+    // Mutable all the way down: `toMap()` and `emptyMap()` are read-only types, so the
+    // delegate has to build a mutable map rather than one the setter can't write to.
     private val values: MutableMap<String, String> by lazy {
         runCatching {
             if (file.exists()) {
                 file.readLines().mapNotNull { line ->
                     val idx = line.indexOf('=')
                     if (idx > 0) line.take(idx) to line.substring(idx + 1) else null
-                }.toMap()
-            } else emptyMap()
-        }.getOrDefault(emptyMap())
+                }.toMap(mutableMapOf())
+            } else mutableMapOf()
+        }.getOrDefault(mutableMapOf())
     }
 
     @Synchronized

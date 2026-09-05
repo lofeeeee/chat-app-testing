@@ -102,9 +102,10 @@ fun MentionsScreen(state: AppState, onClose: () -> Unit) {
 private fun MentionRow(message: MessageDto, resolver: MentionResolver) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
-        horizontalAlignment = Alignment.Top,
+        // A Row aligns its children across its *cross* axis, which is the vertical one.
+        verticalAlignment = Alignment.Top,
     ) {
-        Avatar(message.author.id, message.author.label, size = 32)
+        Avatar(message.author, size = 32)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.Bottom) {

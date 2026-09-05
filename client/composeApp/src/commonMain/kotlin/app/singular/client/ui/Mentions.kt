@@ -1,5 +1,12 @@
 package app.singular.client.ui
 
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import app.singular.client.net.GuildMemberDto
 import app.singular.client.net.UserDto
 
@@ -112,11 +119,133 @@ fun mentionCandidates(
             out += if (isGuildChannel) MentionCandidate.User(user, label) else MentionCandidate.User(user)
         }
 
-    if (isGuildChannel && q.isNotEmpty()) {
-        roles.filter { it.mentionable && it.name.lowercase().contains(q) && !it.isDefault }
-            .take(3)
+    // Roles are offered for an empty query too. Requiring at least one character meant a bare
+    // `@` listed people only, so unless you already knew a role's name you'd never discover
+    // you could mention one.
+    if (isGuildChannel) {
+        roles.filter { it.mentionable && !it.isDefault && (q.isEmpty() || it.name.lowercase().contains(q)) }
+            .take(4)
             .forEach { out += MentionCandidate.Role(it.id, it.name) }
     }
 
     return out.take(limit + 2)
+}
+
+// ---------------------------------------------------------------------------
+// Composer display
+// ---------------------------------------------------------------------------
+
+/**
+ * Shows `@Orbit` in the composer while the draft still holds `<@221239600520105984>`.
+ *
+ * The draft has to stay in the wire format: it is what gets sent, and it is the only form that
+ * survives a rename — the server stores the id and every client re-resolves the name at
+ * display time. But showing that raw token to the person typing is indefensible; they picked a
+ * human out of a list and got a wall of digits back.
+ *
+ * A [VisualTransformation] is exactly the right tool: it changes what is drawn without
+ * touching the value. The alternative — keeping `@Orbit` in the field and resolving names back
+ * to ids at send time — looks simpler and is a trap, because display names are neither unique
+ * nor free of spaces, so "@Sam Vimes" cannot be parsed back reliably.
+ *
+ * The fiddly part is [OffsetMapping]. Every caret position, selection edge and click has to be
+ * translated between the two strings, and Compose will throw if the mapping ever reports an
+ * offset outside the transformed text. A mention is treated as **atomic**: any original offset
+ * inside one maps to the display span's edge, so the caret can sit before or after a mention
+ * but never in the middle of an id the user cannot see.
+ */
+class MentionVisualTransformation(
+    private val resolver: MentionResolver,
+    private val tint: androidx.compose.ui.graphics.Color,
+) : VisualTransformation {
+
+    override fun filter(text: AnnotatedString): TransformedText {
+        val raw = text.text
+        val segments = mutableListOf<Segment>()
+        var cursor = 0
+        var shown = 0
+
+        val builder = StringBuilder()
+        val spans = mutableListOf<Triple<Int, Int, SpanStyle>>()
+
+        for (match in COMPOSER_MENTION.findAll(raw)) {
+            if (match.range.first > cursor) {
+                val literal = raw.substring(cursor, match.range.first)
+                segments += Segment(cursor, match.range.first, shown, shown + literal.length, false)
+                builder.append(literal)
+                shown += literal.length
+            }
+
+            val display = resolver.displayFor(match.value)
+            segments += Segment(
+                match.range.first, match.range.last + 1,
+                shown, shown + display.length, true,
+            )
+            builder.append(display)
+            spans += Triple(shown, shown + display.length, MENTION_SPAN.copy(background = tint))
+            shown += display.length
+            cursor = match.range.last + 1
+        }
+        if (cursor < raw.length) {
+            val tail = raw.substring(cursor)
+            segments += Segment(cursor, raw.length, shown, shown + tail.length, false)
+            builder.append(tail)
+            shown += tail.length
+        }
+
+        val rendered = buildAnnotatedString {
+            append(builder.toString())
+            spans.forEach { (from, to, style) -> addStyle(style, from, to) }
+        }
+
+        return TransformedText(rendered, SegmentOffsetMapping(segments, raw.length, shown))
+    }
+
+    /** One run of the draft, and where it lands in the displayed text. */
+    private data class Segment(
+        val originalStart: Int,
+        val originalEnd: Int,
+        val shownStart: Int,
+        val shownEnd: Int,
+        val isMention: Boolean,
+    )
+
+    private class SegmentOffsetMapping(
+        private val segments: List<Segment>,
+        private val originalLength: Int,
+        private val shownLength: Int,
+    ) : OffsetMapping {
+
+        override fun originalToTransformed(offset: Int): Int {
+            val at = offset.coerceIn(0, originalLength)
+            for (s in segments) {
+                if (at < s.originalStart) break
+                if (at <= s.originalEnd) {
+                    // Atomic: an offset inside a mention snaps to whichever end is nearer, so
+                    // the caret never lands inside an id that isn't on screen.
+                    return if (!s.isMention) s.shownStart + (at - s.originalStart)
+                    else if (at - s.originalStart <= s.originalEnd - at) s.shownStart else s.shownEnd
+                }
+            }
+            return shownLength
+        }
+
+        override fun transformedToOriginal(offset: Int): Int {
+            val at = offset.coerceIn(0, shownLength)
+            for (s in segments) {
+                if (at < s.shownStart) break
+                if (at <= s.shownEnd) {
+                    return if (!s.isMention) s.originalStart + (at - s.shownStart)
+                    else if (at - s.shownStart <= s.shownEnd - at) s.originalStart else s.originalEnd
+                }
+            }
+            return originalLength
+        }
+    }
+
+    private companion object {
+        /** Same entities the renderer knows, plus the two literals. */
+        val COMPOSER_MENTION = Regex("""<@&?\d{1,20}>|<#\d{1,20}>|(?<=^|\s)@(everyone|here)\b""")
+        val MENTION_SPAN = SpanStyle(fontWeight = FontWeight.SemiBold)
+    }
 }

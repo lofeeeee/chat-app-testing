@@ -25,6 +25,7 @@ import app.singular.client.net.NotificationsData
 import app.singular.client.net.AddReactionData
 import app.singular.client.net.RemoveReactionData
 import app.singular.client.net.ReactionDto
+import app.singular.client.net.ReactionUpdateDto
 import app.singular.client.net.ReactionUpdatedData
 import app.singular.client.net.MentionInboxData
 import app.singular.client.net.SetCustomStatusData
@@ -33,13 +34,20 @@ import app.singular.client.net.UnassignRoleData
 import app.singular.client.net.UpdateGuildData
 import app.singular.client.net.UpdateRoleData
 import app.singular.client.net.isNewerSnowflake
+import app.singular.client.platform.REFRESH_TOKEN_KEY
+import app.singular.client.platform.clearSecret
+import app.singular.client.platform.readLocalString
+import app.singular.client.platform.readSecret
+import app.singular.client.platform.writeLocalString
 import app.singular.client.platform.showNotification
+import app.singular.client.platform.writeSecret
 import app.singular.client.net.LoginData
 import app.singular.client.net.MessageCreatedData
 import app.singular.client.net.MessageDto
 import app.singular.client.net.MessagesData
 import app.singular.client.net.OpenDmData
 import app.singular.client.net.Operations
+import app.singular.client.net.RefreshData
 import app.singular.client.net.RegisterData
 import app.singular.client.net.SendMessageData
 import app.singular.client.net.BlockData
@@ -75,6 +83,7 @@ import app.singular.client.net.StartTypingData
 import app.singular.client.net.TypingData
 import app.singular.client.net.UserByHandleData
 import app.singular.client.net.UserDto
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -217,6 +226,78 @@ class AppState(
      */
     val unread = mutableStateMapOf<String, Boolean>()
 
+    /**
+     * How many unread messages in each channel are aimed at *you* — the red badge.
+     *
+     * Counted separately from [unread] because they answer different questions and deserve
+     * different urgency: "something happened here" is a colour change you can ignore, "you
+     * were asked something" is a number you cannot. Merging them would make every busy channel
+     * look like it needed you.
+     *
+     * Whether a message counts is decided from the server's own `mentions` list rather than by
+     * re-parsing the body here — the server already resolved roles and `@everyone` to decide
+     * who to notify, and a second implementation would eventually disagree with it.
+     */
+    val mentionCounts = mutableStateMapOf<String, Int>()
+
+    // -- Notification preferences -------------------------------------------
+    //
+    // Local, not server-side, and deliberately so: "pop a toast on this machine" is a property
+    // of the machine. The same account on a work laptop and a phone wants different answers,
+    // and syncing these would make choosing quiet on one device silence all of them.
+
+    // Each is a backing snapshot field plus a property whose setter also persists, rather than
+    // a `var` with a separate `setX()` function — Kotlin already emits `setNotifyEnabled` for
+    // the `var`, so the pair collides on the JVM. This shape also means the call site is a
+    // plain assignment and cannot forget to save.
+
+    private var notifyEnabledState by mutableStateOf(readLocalString(NOTIFY_ENABLED) != "false")
+    private var notifyMentionsOnlyState by mutableStateOf(readLocalString(NOTIFY_MENTIONS_ONLY) == "true")
+    private var notifyPreviewsState by mutableStateOf(readLocalString(NOTIFY_PREVIEWS) != "false")
+
+    /** Master switch. Off means the app never raises a system notification. */
+    var notifyEnabled: Boolean
+        get() = notifyEnabledState
+        set(value) {
+            notifyEnabledState = value
+            writeLocalString(NOTIFY_ENABLED, value.toString())
+        }
+
+    /** Only notify when you were actually addressed, rather than for every message. */
+    var notifyMentionsOnly: Boolean
+        get() = notifyMentionsOnlyState
+        set(value) {
+            notifyMentionsOnlyState = value
+            writeLocalString(NOTIFY_MENTIONS_ONLY, value.toString())
+        }
+
+    /**
+     * Whether the toast shows the message text.
+     *
+     * Off puts "New message" in place of the body. A notification is drawn over the lock
+     * screen and into every screen-share, so this is a privacy control rather than a cosmetic
+     * one — which is why it defaults to on but is one click from off.
+     */
+    var notifyPreviews: Boolean
+        get() = notifyPreviewsState
+        set(value) {
+            notifyPreviewsState = value
+            writeLocalString(NOTIFY_PREVIEWS, value.toString())
+        }
+
+    /**
+     * The channel you were last reading in each server, so switching back lands where you left.
+     *
+     * A plain map, not snapshot state: nothing renders from it directly — it is only read at
+     * the moment [openGuild] decides where to go — so making it observable would schedule
+     * recompositions for a value no composable looks at.
+     *
+     * In memory only, and deliberately so for now: persisting it belongs with the read-cursor
+     * work, where "where was I" is answered from the server and follows you between devices,
+     * rather than being half-solved per install here.
+     */
+    private val lastChannelPerGuild = mutableMapOf<String, String>()
+
     private var refreshToken: String? = null
     private var subscription: Job? = null
     private var typingSubscription: Job? = null
@@ -287,8 +368,41 @@ class AppState(
         // Seed the live presence map with our own, so the custom status shows before the
         // first presenceChanged event (which may be never — it only fires on change).
         user.presence?.let { presence[it.userId] = it }
-        // TODO(phase 5): persist `refresh` to the OS keystore so sign-in survives a restart.
-        // Plain preferences would be a credential written to disk in the clear.
+
+        // Persisted so a relaunch doesn't ask for the password again. Written on every
+        // adoption, not just the first, because refresh tokens are single-use and rotate —
+        // storing only the original would leave a token that is already spent by the time
+        // anyone tried to use it.
+        writeSecret(REFRESH_TOKEN_KEY, refresh)
+    }
+
+    /**
+     * Tries to restore the previous session from the stored refresh token.
+     *
+     * Returns true when it worked, so the UI can hold the splash rather than flashing the
+     * login form and then replacing it a beat later.
+     *
+     * Any failure clears the stored token and reports false. That is the right response to
+     * *every* failure here, not just an expired one: the server revokes a whole token family
+     * when it sees a token reused, so a token that fails to exchange may well be one someone
+     * else has already spent — and keeping it would retry a dead credential on every launch.
+     */
+    suspend fun tryRestoreSession(): Boolean {
+        val stored = readSecret(REFRESH_TOKEN_KEY) ?: return false
+        return try {
+            val payload = client.execute<RefreshData>(
+                Operations.REFRESH,
+                buildJsonObject { put("token", stored) },
+            ).refresh
+            adoptSession(payload.accessToken, payload.refreshToken, payload.user)
+            startSession()
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            clearSecret(REFRESH_TOKEN_KEY)
+            false
+        }
     }
 
     // -- Channels and messages ----------------------------------------------
@@ -345,6 +459,8 @@ class AppState(
                             presence[p.userId] = p
                             if (p.userId == currentUser?.id) myStatus = p.status
                         }
+                } catch (e: CancellationException) {
+                    throw e   // shutting down, not failing — see watch()
                 } catch (_: Exception) {
                     // A stale presence dot is not worth an error banner.
                 }
@@ -536,12 +652,16 @@ class AppState(
 
         client.accessToken = null
         refreshToken = null
+        // The stored token is revoked server-side by the logout above; leaving the file behind
+        // would mean the next launch silently tries a dead credential.
+        clearSecret(REFRESH_TOKEN_KEY)
         channels.clear()
         messages.clear()
         guilds.clear()
         stories.clear()
         lastMessages.clear()
         unread.clear()
+        mentionCounts.clear()
         mutedChannels.clear()
         presence.clear()
         selectedChannel = null
@@ -596,6 +716,7 @@ class AppState(
     fun openChannel(channel: ChannelDto) = run {
         selectedChannel = channel
         unread.remove(channel.id)
+        mentionCounts.remove(channel.id)
         val vars = buildJsonObject {
             put("channelId", channel.id)
             put("limit", 50)
@@ -708,6 +829,7 @@ class AppState(
     private suspend fun openChannelNow(channel: ChannelDto) {
         selectedChannel = channel
         unread.remove(channel.id)
+        mentionCounts.remove(channel.id)
         val page = client.execute<MessagesData>(
             Operations.MESSAGES,
             buildJsonObject { put("channelId", channel.id); put("limit", 50) },
@@ -770,6 +892,12 @@ class AppState(
                             .message
                         if (message.channelId == selectedChannel?.id) appendIfNew(message)
                     }
+                } catch (e: CancellationException) {
+                    // Cancellation is not a failure. It is how leaving a channel, signing out
+                    // or closing the app *stops* this loop — and CancellationException is an
+                    // Exception, so a bare `catch (e: Exception)` reported the shutdown as a
+                    // connection error and left "Reconnecting…" pinned to a healthy screen.
+                    throw e
                 } catch (e: Exception) {
                     error = "Reconnecting… (${describe(e)})"
                 }
@@ -802,6 +930,8 @@ class AppState(
                             .decodeFromJsonElement(ReactionUpdatedData.serializer(), data).update
                         if (update.channelId == selectedChannel?.id) applyReactionUpdate(update)
                     }
+                } catch (e: CancellationException) {
+                    throw e   // shutting down, not failing — see watch()
                 } catch (_: Exception) {
                     // Same policy as typing: a stale chip is not worth a banner.
                 }
@@ -911,7 +1041,7 @@ class AppState(
      *
      * Only called for guild channels; DMs use the channel's own member list.
      */
-    private fun loadChannelMembers(guildId: String) {
+    private suspend fun loadChannelMembers(guildId: String) {
         try {
             val loaded = client.execute<GuildMembersData>(
                 GuildOperations.GUILD_MEMBERS,
@@ -939,6 +1069,8 @@ class AppState(
                             .decodeFromJsonElement(TypingData.serializer(), data).event
                         if (event.channelId == selectedChannel?.id) noteTyping(event.user)
                     }
+                } catch (e: CancellationException) {
+                    throw e   // shutting down, not failing — see watch()
                 } catch (_: Exception) {
                     // Silent: a missing typing indicator is not worth a banner.
                 }
@@ -1148,6 +1280,11 @@ class AppState(
      * would put someone else's private conversation on screen under a server's header.
      */
     fun openGuild(guild: GuildDto?) {
+        // Remember where you were in the server you're leaving, before anything is cleared.
+        selectedGuild?.let { previous ->
+            selectedChannel?.let { open -> lastChannelPerGuild[previous.id] = open.id }
+        }
+
         selectedGuild = guild
         selectedChannel = null
         messages.clear()
@@ -1156,6 +1293,18 @@ class AppState(
         typingSubscription?.cancel()
         reactionSubscription?.cancel()
         clearTyping()
+
+        // Walk back into the channel you were last reading here. A server that dumps you on an
+        // empty pane every time makes you re-navigate on every switch, and the one thing you
+        // reliably want is the conversation you just left.
+        guild?.let { target ->
+            val remembered = lastChannelPerGuild[target.id]
+                ?.let { id -> target.channels.firstOrNull { it.id == id } }
+            // Falling back to the first text channel rather than nothing: on a server you have
+            // never opened there is no memory to honour, and an empty pane is not an answer.
+            val landing = remembered ?: target.channels.firstOrNull { it.type == "GUILD_TEXT" }
+            landing?.let(::openChannel)
+        }
     }
 
     fun createGuild(name: String) = run {
@@ -1475,6 +1624,8 @@ class AppState(
                             .decodeFromJsonElement(NotificationsData.serializer(), data).message
                         onNotified(message)
                     }
+                } catch (e: CancellationException) {
+                    throw e   // shutting down, not failing — see watch()
                 } catch (_: Exception) {
                     // Silent. A dropped notification socket must not put a red banner over a
                     // conversation that is working perfectly well on its own subscription.
@@ -1502,6 +1653,15 @@ class AppState(
         if (mutedChannels[message.channelId] == true) return
 
         unread[message.channelId] = true
+        val addressed = addressesMe(message)
+        if (addressed) {
+            mentionCounts[message.channelId] = (mentionCounts[message.channelId] ?: 0) + 1
+        }
+
+        // The badges above are updated regardless — those are ambient state, and silencing
+        // notifications should not also blind the sidebar. Only the toast is suppressed.
+        if (!notifyEnabled) return
+        if (notifyMentionsOnly && !addressed) return
 
         val channel = channels.firstOrNull { it.id == message.channelId }
             ?: guilds.flatMap { it.channels }.firstOrNull { it.id == message.channelId }
@@ -1515,8 +1675,61 @@ class AppState(
             else -> message.author.label
         }
 
-        showNotification(title, previewOf(message))
+        showNotification(
+            title,
+            // "New message" instead of the text when previews are off — a toast is drawn over
+            // the lock screen and into every screen-share.
+            if (notifyPreviews) previewOf(message) else "New message",
+        )
     }
+
+    /**
+     * Whether a message is addressed to the viewer: by name, by a role they hold, or by a
+     * broadcast.
+     *
+     * Reads the server's resolved `mentions` list, not the message body. The server has
+     * already done this work to decide who to notify, and it knows things the client would
+     * have to guess at — so re-deriving it here would eventually produce a badge that
+     * disagrees with the notification that was actually sent.
+     */
+    private fun addressesMe(message: MessageDto): Boolean {
+        val me = currentUser?.id ?: return false
+
+        // Roles are per-server, so a ROLE mention only counts if it names a role you hold in
+        // the server that channel belongs to.
+        val myRoles = guilds
+            .firstOrNull { g -> g.channels.any { it.id == message.channelId } }
+            ?.me?.roles?.map { it.id }.orEmpty().toSet()
+
+        return message.mentions.any { mention ->
+            when (mention.type) {
+                "USER" -> mention.targetId == me
+                "ROLE" -> mention.targetId in myRoles
+                "EVERYONE", "HERE" -> true
+                else -> false
+            }
+        }
+    }
+
+    /**
+     * Unread and mention state rolled up to a server, for the rail.
+     *
+     * Computed from the channel maps rather than tracked separately: one source of truth means
+     * opening a channel clears the server's dot for free, instead of needing a second
+     * bookkeeping path that can drift out of step with the first.
+     */
+    fun guildHasUnread(guild: GuildDto): Boolean =
+        guild.channels.any { unread[it.id] == true }
+
+    fun guildMentionCount(guild: GuildDto): Int =
+        guild.channels.sumOf { mentionCounts[it.id] ?: 0 }
+
+    /** The same rollup for a category: what its children are carrying while it is collapsed. */
+    fun categoryHasUnread(children: List<ChannelDto>): Boolean =
+        children.any { unread[it.id] == true }
+
+    fun categoryMentionCount(children: List<ChannelDto>): Int =
+        children.sumOf { mentionCounts[it.id] ?: 0 }
 
     /** The same one-line summary the sidebar shows, reused so the toast can't disagree with it. */
     private fun previewOf(message: MessageDto): String =
@@ -1590,6 +1803,10 @@ class AppState(
         (1..16).map { NONCE_ALPHABET[Random.nextInt(NONCE_ALPHABET.length)] }.joinToString("")
 
     private companion object {
+        const val NOTIFY_ENABLED = "notify_enabled"
+        const val NOTIFY_MENTIONS_ONLY = "notify_mentions_only"
+        const val NOTIFY_PREVIEWS = "notify_previews"
+
         const val NONCE_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
         /** At most one typing mutation per this long, however fast someone types. */

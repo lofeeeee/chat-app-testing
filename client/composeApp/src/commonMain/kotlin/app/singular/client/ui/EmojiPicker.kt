@@ -33,6 +33,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.isShiftPressed
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.singular.client.platform.readLocalList
@@ -83,13 +86,13 @@ fun EmojiPicker(
         tonalElevation = 4.dp,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
     ) {
-        Column(Modifier.padding(10.dp)) {
+        Column(Modifier.padding(8.dp)) {
             // -- Search ----------------------------------------------------------
 
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth().height(52.dp),
+                modifier = Modifier.fillMaxWidth().height(48.dp),
                 placeholder = { Text("Search emoji") },
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 trailingIcon = {
@@ -113,15 +116,16 @@ fun EmojiPicker(
                 Spacer(Modifier.height(4.dp))
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(8),
-                    modifier = Modifier.height(76.dp).fillMaxWidth(),
+                    modifier = Modifier.height(38.dp).fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     userScrollEnabled = false,
                 ) {
-                    items(recents.value.take(16)) { emoji ->
-                        EmojiCell(emoji) {
+                    items(recents.value.take(8)) { emoji ->
+                        EmojiCell(emoji) { keepOpen ->
                             noteEmojiUsed(recents, emoji)
                             onPick(emoji)
+                            if (!keepOpen) onClose()
                         }
                     }
                 }
@@ -173,15 +177,20 @@ fun EmojiPicker(
                 )
             } else {
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(36.dp),
-                    modifier = Modifier.height(236.dp).fillMaxWidth(),
+                    columns = GridCells.Adaptive(34.dp),
+                    modifier = Modifier.height(200.dp).fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                     items(entries, key = { it.name }) { entry ->
-                        EmojiCell(entry.emoji) {
+                        EmojiCell(entry.emoji) { keepOpen ->
                             noteEmojiUsed(recents, entry.emoji)
                             onPick(entry.emoji)
+                            // One emoji is the common case, so a plain click finishes the job
+                            // and gets out of the way. Shift keeps the panel up for a run of
+                            // them — the same "hold Shift to keep going" people already know
+                            // from multi-select everywhere else.
+                            if (!keepOpen) onClose()
                         }
                     }
                 }
@@ -192,13 +201,31 @@ fun EmojiPicker(
 
 /** One tappable emoji, drawn with the bundled font. */
 @Composable
-private fun EmojiCell(emoji: String, onClick: () -> Unit) {
+private fun EmojiCell(emoji: String, onClick: (keepOpen: Boolean) -> Unit) {
     val font = emojiFontFamily()
+
+    // Whether Shift was down for the gesture that is about to become a click.
+    //
+    // `clickable` reports that a click happened and nothing about how — no modifier keys. So
+    // the modifier state is captured from the pointer event itself on the **Initial** pass,
+    // which runs before the click handler, and read back when the click arrives. Watching a
+    // Shift key-down instead would be wrong: the picker does not hold focus, so it never sees
+    // the key events at all.
+    var shiftHeld by remember { mutableStateOf(false) }
+
     Box(
         Modifier
-            .size(36.dp)
+            .size(34.dp)
             .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick),
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        shiftHeld = event.keyboardModifiers.isShiftPressed
+                    }
+                }
+            }
+            .clickable { onClick(shiftHeld) },
         contentAlignment = Alignment.Center,
     ) {
         Text(

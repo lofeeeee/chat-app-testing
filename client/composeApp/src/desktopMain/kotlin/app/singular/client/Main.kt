@@ -1,6 +1,7 @@
 package app.singular.client
 
 import androidx.compose.ui.unit.DpSize
+import app.singular.client.ui.SingularTitleBar
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
@@ -9,16 +10,32 @@ import java.io.File
 import java.util.UUID
 
 fun main() = application {
+    val windowState = rememberWindowState(size = DpSize(1180.dp, 780.dp))
+
     Window(
         onCloseRequest = ::exitApplication,
         title = "Singular",
-        state = rememberWindowState(size = DpSize(1180.dp, 780.dp)),
+        state = windowState,
+        // The OS bar is gone so the app can draw its own, themed one. Everything that bar did
+        // — dragging, double-click to maximise, the caption buttons — now lives in
+        // SingularTitleBar, which is the whole cost of doing this.
+        undecorated = true,
+        // Kept resizable: undecorated windows lose the OS resize grips, and Compose Desktop
+        // supplies its own only while this is true.
+        resizable = true,
     ) {
         // Point at another host with -Dsingular.server=https://chat.example.com
         val host = System.getProperty("singular.server")
+
+        // The bar sits above the app rather than inside it, so every screen — login included —
+        // gets it without having to remember to draw one.
         App(
             httpUrl = host?.let { "$it/graphql" } ?: SingularDefaults.HTTP,
-            wsUrl = host?.let { "${it.replaceFirst("http", "ws")}/graphql" } ?: SingularDefaults.WS,
+            wsUrl = host?.let { "${it.replaceFirst("http", "ws")}/graphql" }
+                ?: SingularDefaults.WS,
+            // Passed in rather than wrapped around App, so the bar is drawn inside the theme
+            // and follows the user's palette. The WindowScope receiver is captured from here.
+            titleBar = { SingularTitleBar(state = windowState, onClose = ::exitApplication) },
         )
     }
 }

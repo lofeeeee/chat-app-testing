@@ -101,9 +101,15 @@ data class LastMessageDto(
      *
      * An attachment with no caption gets a label rather than an empty row — "Photo" is what
      * you actually want to read there, and a blank line looks like a bug.
+     *
+     * [resolveMention] turns the wire form into something readable. Without it a message whose
+     * body is a mention previews as `You: <@221239599735771136>`, which is not a preview of
+     * anything — the sidebar was showing an id where the conversation shows a name. It
+     * defaults to identity so a caller with no user data still gets the text, just unresolved.
      */
-    fun preview(selfId: String?): String {
-        val body = content?.replace('\n', ' ')?.trim().orEmpty().ifEmpty {
+    fun preview(selfId: String?, resolveMention: (String) -> String = { it }): String {
+        val readable = content?.let { MENTION_WIRE.replace(it) { m -> resolveMention(m.value) } }
+        val body = readable?.replace('\n', ' ')?.trim().orEmpty().ifEmpty {
             when (attachments.firstOrNull()?.kind) {
                 "IMAGE" -> "Photo"
                 "VIDEO" -> "Video"
@@ -114,6 +120,11 @@ data class LastMessageDto(
             }
         }
         return if (author.id == selfId) "You: $body" else body
+    }
+
+    private companion object {
+        /** Mirrors the renderer's pattern — one place could drift, two definitely would. */
+        val MENTION_WIRE = Regex("""<@&?\d{1,20}>|<#\d{1,20}>""")
     }
 }
 

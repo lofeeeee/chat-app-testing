@@ -36,11 +36,26 @@ private val CATEGORY_ORDER = listOf(
     EmojiCategory.SYMBOLS,
 )
 
-/** The full pickable set, in category order. */
-val ALL_EMOJI: List<EmojiEntry> = CATEGORY_ORDER.flatMap(::emojiFor)
+/**
+ * The full pickable set, in category order.
+ *
+ * `by lazy`, and that is load-bearing rather than an optimisation.
+ *
+ * Kotlin initialises a file's top-level properties **in declaration order**, in one `<clinit>`.
+ * This property sits above [SMILEYS], [ANIMALS] and the rest, so an eager initialiser here runs
+ * while every one of those is still null — `flatMap` then hands `addAll` a null list and the
+ * whole class fails to initialise with an `ExceptionInInitializerError`. Worse, the failure
+ * only surfaces when something first touches the class, so it read as "the emoji button
+ * crashes the app" rather than as anything to do with ordering.
+ *
+ * Deferring the computation sidesteps the ordering question entirely, instead of relying on
+ * nobody ever moving a declaration again. It also means the ~900 entries are only built if the
+ * picker is actually opened.
+ */
+val ALL_EMOJI: List<EmojiEntry> by lazy { CATEGORY_ORDER.flatMap(::emojiFor) }
 
-/** [emoji] by shortcode, e.g. "smile" -> "😃". */
-val EMOJI_BY_NAME: Map<String, String> = ALL_EMOJI.associate { it.name to it.emoji }
+/** [emoji] by shortcode, e.g. "smile" -> "😃". Lazy for the same reason as [ALL_EMOJI]. */
+val EMOJI_BY_NAME: Map<String, String> by lazy { ALL_EMOJI.associate { it.name to it.emoji } }
 
 fun emojiFor(category: EmojiCategory): List<EmojiEntry> = when (category) {
     EmojiCategory.RECENT -> emptyList()   // populated at runtime, not a static list

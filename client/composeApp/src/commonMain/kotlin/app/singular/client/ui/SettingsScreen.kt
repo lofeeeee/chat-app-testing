@@ -107,8 +107,8 @@ fun SettingsScreen(state: AppState, onClose: () -> Unit) {
 enum class SettingsSection(val title: String, val blurb: String) {
     ACCOUNT("Account", "Name, handle, picture"),
     APPEARANCE("Appearance", "Theme and chat layout"),
-    PRIVACY("Privacy", "Blocked people"),
-    NOTIFICATIONS("Notifications", "Muted conversations"),
+    PRIVACY("Privacy", "Blocked and muted"),
+    NOTIFICATIONS("Notifications", "Alerts on this device"),
     ABOUT("About", "Version and shortcuts"),
 }
 
@@ -218,21 +218,13 @@ private fun AppearanceSection(state: AppState) {
 
         HorizontalDivider()
 
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Dark theme", style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    if (state.themeDark == null) "Following your system setting"
-                    else "Set manually",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
-                checked = state.themeDark ?: true,
-                onCheckedChange = { state.setThemeDark(it) },
-            )
-        }
+        SettingToggle(
+            title = "Dark theme",
+            description = if (state.themeDark == null) "Following your system setting"
+                          else "Set manually",
+            checked = state.themeDark ?: true,
+            onCheckedChange = { state.setThemeDark(it) },
+        )
     }
 }
 
@@ -636,19 +628,8 @@ private val USERNAME_RE = Regex("^[A-Za-z0-9_.]{2,32}$")
  * miss the cache on every redraw.
  */
 @Composable
-internal fun UserAvatar(user: app.singular.client.net.UserDto, label: String, size: Int) {
-    val url = user.avatarUrl
-    if (url != null) {
-        RemoteImage(
-            url = url,
-            stableKey = user.avatarKey ?: user.id,
-            contentDescription = "Your profile picture",
-            modifier = Modifier.size(size.dp),
-        )
-    } else {
-        Avatar(user.id, label, size)
-    }
-}
+internal fun UserAvatar(user: app.singular.client.net.UserDto, label: String, size: Int) =
+    Avatar(user, size, label)
 
 // ---------------------------------------------------------------------------
 // The remaining sections
@@ -657,6 +638,7 @@ internal fun UserAvatar(user: app.singular.client.net.UserDto, label: String, si
 /** Feature 11's other half: undoing a block, which otherwise had nowhere to live. */
 @Composable
 private fun PrivacySection(state: AppState) {
+    val muted = state.channels.filter { state.mutedChannels[it.id] == true }
     val blocked = state.channels
         .flatMap { it.members }
         .filter { it.blockedByViewer && it.id != state.currentUser?.id }
@@ -680,7 +662,7 @@ private fun PrivacySection(state: AppState) {
         } else {
             blocked.forEach { person ->
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Avatar(person.id, person.label, 32)
+                    Avatar(person, 32)
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text(person.label, style = MaterialTheme.typography.bodyMedium)
@@ -695,22 +677,19 @@ private fun PrivacySection(state: AppState) {
             }
         }
     }
-}
 
-@Composable
-private fun NotificationsSection(state: AppState) {
-    val muted = state.channels.filter { state.mutedChannels[it.id] == true }
-
+    // Muting moved here from Notifications. Both cards answer the same question — who and
+    // what have I turned down — and splitting them meant checking two screens to find out why
+    // something was quiet. Notifications now holds only the settings that apply to the device.
     SettingsCard {
-        Text("Muted conversations", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(
-            if (notificationsAvailable) {
-                "Desktop notifications are on. You're told about messages in " +
-                    "conversations you don't have open, except muted ones."
-            } else {
-                "This device can't show notifications — the system tray is unavailable. " +
-                    "Messages still arrive; nothing pops up."
-            },
+            "Muted conversations",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            "Muted conversations still arrive and still mark the sidebar — they just don't " +
+                "raise a notification.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -733,6 +712,56 @@ private fun NotificationsSection(state: AppState) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun NotificationsSection(state: AppState) {
+    SettingsCard {
+        Text("Notifications", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            if (notificationsAvailable) {
+                "These apply to this device only. The same account on another machine keeps " +
+                    "its own settings, because “be quiet here” rarely means “be quiet everywhere”."
+            } else {
+                "This device can't show notifications — the system tray is unavailable. " +
+                    "Messages still arrive and the sidebar still marks them; nothing pops up."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        SettingToggle(
+            title = "Desktop notifications",
+            description = "Pop a notification for messages in conversations you don't have open.",
+            checked = state.notifyEnabled,
+            onCheckedChange = { state.notifyEnabled = it },
+            enabled = notificationsAvailable,
+        )
+        SettingToggle(
+            title = "Only when I'm mentioned",
+            description = "Stay silent unless a message names you, a role you hold, or @everyone.",
+            checked = state.notifyMentionsOnly,
+            onCheckedChange = { state.notifyMentionsOnly = it },
+            // Pointless while notifications are off entirely, so it greys out rather than
+            // sitting there implying it still does something.
+            enabled = notificationsAvailable && state.notifyEnabled,
+        )
+        SettingToggle(
+            title = "Show message text",
+            description = "Off shows only “New message” — useful when you share your screen.",
+            checked = state.notifyPreviews,
+            onCheckedChange = { state.notifyPreviews = it },
+            enabled = notificationsAvailable && state.notifyEnabled,
+        )
+
+        HorizontalDivider()
+        Text(
+            "Muting a single conversation is on that conversation, from the bell in its " +
+                "header. Muted ones are listed under Privacy.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

@@ -46,7 +46,7 @@ fun StoryViewerDialog(story: StoryDto, isMine: Boolean, onClose: () -> Unit) {
         confirmButton = {},
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Avatar(story.author.id, story.author.label, 32)
+                Avatar(story.author, 32)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(story.author.label, fontWeight = FontWeight.SemiBold)

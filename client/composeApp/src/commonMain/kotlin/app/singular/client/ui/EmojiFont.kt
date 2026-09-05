@@ -6,7 +6,10 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import org.jetbrains.compose.resources.Font
 import singular_client.composeapp.generated.resources.Res
-import singular_client.composeapp.generated.resources.font
+// The generated accessor is an *extension property* on `Res.font`, declared at package level
+// and named after the file — so it is imported by that name. Importing `...resources.font`
+// looks right and isn't: `font` is a nested object reached through `Res`, not a package.
+import singular_client.composeapp.generated.resources.noto_color_emoji
 
 /**
  * The bundled emoji face (what.txt: never rely on the OS emoji font — Windows renders many
@@ -57,7 +60,11 @@ private fun isSequenceContinuation(c: Int): Boolean =
  *
  * Keycaps (`1️⃣` = '1' + VS16 + keycap) are the one backward case: the leading ASCII digit
  * must join the run or the glyph breaks in half, so a run that begins with a continuation
- * codepoint swallows one preceding digit/#/*.
+ * codepoint swallows one preceding digit, hash or asterisk.
+ *
+ * (Spell those three out rather than writing them as symbols: Kotlin block comments **nest**,
+ * unlike C's, so a slash-star sequence inside this comment opens a second one and the closing
+ * delimiter below then ends only the inner comment — silently swallowing the rest of the file.)
  */
 fun emojiRunRanges(text: String): List<IntRange> {
     val ranges = mutableListOf<IntRange>()
@@ -77,7 +84,7 @@ fun emojiRunRanges(text: String): List<IntRange> {
         }
 
         var effectiveStart = start
-        // A keycap's base character is an ASCII digit/#/* immediately before the selector.
+        // A keycap's base is an ASCII digit, hash or asterisk right before the selector.
         if (effectiveStart > 0 && effectiveStart < text.length) {
             val base = text[effectiveStart - 1]
             if (isSequenceContinuation(text[effectiveStart].code) &&

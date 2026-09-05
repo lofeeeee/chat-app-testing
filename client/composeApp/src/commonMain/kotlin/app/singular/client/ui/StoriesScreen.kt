@@ -197,7 +197,7 @@ private fun MyStatusRow(
                         .padding(4.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Avatar(latest.author.id, latest.author.label, 48)
+                    Avatar(latest.author, 48)
                 }
             } else {
                 Box(
@@ -261,7 +261,7 @@ private fun StoryListRow(story: StoryDto, onClick: () -> Unit) {
             Modifier.size(56.dp).border(ringWidth, ringColor, CircleShape).padding(4.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Avatar(story.author.id, story.author.label, 48)
+            Avatar(story.author, 48)
         }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {

@@ -337,7 +337,7 @@ private fun MemberRow(
 
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Avatar(member.user.id, member.displayName, 36)
+            Avatar(member.user, 36, member.displayName)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -372,16 +372,12 @@ private fun MemberRow(
             // The assignable roles, as one toggle each. A full member×role matrix would be a
             // wall of switches; per-member expansion keeps it to the one person you're on.
             guild.roles.filter { !it.isDefault }.forEach { role ->
-                Row(
-                    Modifier.fillMaxWidth().padding(start = 46.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(role.name, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                    Switch(
-                        checked = member.roles.any { it.id == role.id },
-                        onCheckedChange = { onToggleRole(role.id, it) },
-                    )
-                }
+                SettingToggle(
+                    title = role.name,
+                    checked = member.roles.any { it.id == role.id },
+                    onCheckedChange = { onToggleRole(role.id, it) },
+                    modifier = Modifier.padding(start = 46.dp),
+                )
             }
         }
     }
@@ -498,28 +494,20 @@ private fun RoleEditor(
         enabled = editable,
         modifier = Modifier.fillMaxWidth(),
     )
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text("Show separately", style = MaterialTheme.typography.bodyMedium)
-            Text(
-                "Members with this role get their own section in the member list.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Switch(checked = hoist, onCheckedChange = { hoist = it }, enabled = editable)
-    }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text("Mentionable", style = MaterialTheme.typography.bodyMedium)
-            Text(
-                "Anyone can @mention this role, which notifies everyone holding it.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Switch(checked = mentionable, onCheckedChange = { mentionable = it }, enabled = editable)
-    }
+    SettingToggle(
+        title = "Show separately",
+        description = "Members with this role get their own section in the member list.",
+        checked = hoist,
+        onCheckedChange = { hoist = it },
+        enabled = editable,
+    )
+    SettingToggle(
+        title = "Mentionable",
+        description = "Anyone can @mention this role, which notifies everyone holding it.",
+        checked = mentionable,
+        onCheckedChange = { mentionable = it },
+        enabled = editable,
+    )
 
     if (editable) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
