@@ -411,7 +411,9 @@ private fun BubbleRow(
 
         Column(
             horizontalAlignment = if (row.mine) Alignment.End else Alignment.Start,
-            modifier = Modifier.widthIn(max = 520.dp),
+            // 520dp is the readable measure; the fraction is what the column can spare.
+            // Taking the smaller stops a 520dp bubble appearing in a 400dp conversation.
+            modifier = Modifier.widthIn(max = cappedWidth(max = 520.dp, fractionOfWindow = 0.62f)),
         ) {
             // Display name only — never the handle. Handles are for finding people, not for
             // reading a conversation; nobody wants "Orbit#2989" above every line.
@@ -601,15 +603,25 @@ internal fun Avatar(user: UserDto, size: Int, label: String = user.label) {
         return
     }
 
-    RemoteImage(
-        url = url,
-        // The key, never the URL. Avatar URLs are presigned and carry a fresh signature on
-        // every fetch, so keying the cache on them would miss every time and re-download the
-        // same face for every row in a busy channel.
-        stableKey = user.avatarKey ?: user.id,
-        contentDescription = label,
-        modifier = Modifier.size(size.dp).clip(CircleShape),
-    )
+    // Initials underneath, picture on top.
+    //
+    // Not an either/or: a presigned URL can fail — object storage down, the signature expired,
+    // the network gone — and the previous version drew the image or nothing at all, so a
+    // failed fetch left an empty circle where a person should be. Layering means the fallback
+    // is already on screen, and the picture simply covers it when it arrives. It also removes
+    // the blank flash while a large avatar downloads.
+    Box(Modifier.size(size.dp), contentAlignment = Alignment.Center) {
+        Avatar(user.id, label, size)
+        RemoteImage(
+            url = url,
+            // The key, never the URL. Avatar URLs are presigned and carry a fresh signature on
+            // every fetch, so keying the cache on them would miss every time and re-download
+            // the same face for every row in a busy channel.
+            stableKey = user.avatarKey ?: user.id,
+            contentDescription = label,
+            modifier = Modifier.size(size.dp).clip(CircleShape),
+        )
+    }
 }
 
 /**

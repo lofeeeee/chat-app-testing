@@ -1,10 +1,9 @@
 package app.singular.client.ui
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.onClick
-import androidx.compose.foundation.window.WindowDraggableArea
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,6 +21,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,16 +29,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.awt.ComposeWindow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.WindowPlacement
-import androidx.compose.ui.window.WindowScope
-import androidx.compose.ui.window.WindowState
+import java.awt.Frame
+import java.awt.MouseInfo
+import java.awt.Point
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
+import java.awt.event.WindowStateListener
 
 /**
  * The window's own title bar, drawn by the app.
@@ -48,69 +53,127 @@ import androidx.compose.ui.window.WindowState
  * looking like 2012 while everything below it doesn't. Drawing it ourselves makes the whole
  * window one surface.
  *
- * The cost is that everything a title bar does has to be re-implemented, and the pieces are
- * easy to forget: dragging, double-click to maximise, and hover states that make the buttons
- * feel like buttons. All three are here.
+ * The cost is that *everything* the OS bar did has to be re-implemented, and the pieces are
+ * easy to miss. All of them are here: dragging, double-click to maximise, edge snapping,
+ * hover states, and — the one that actually bit — keeping the maximise button in step with a
+ * window state the OS can change behind our back.
  *
  * **Close goes red on hover; the other two don't.** That isn't decoration — it's the one
  * affordance separating "put this away" from "lose what I was doing", and every desktop
  * platform has converged on it.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun WindowScope.SingularTitleBar(
-    state: WindowState,
+fun SingularTitleBar(
+    window: ComposeWindow,
     onClose: () -> Unit,
     title: String = "Singular",
 ) {
-    // WindowDraggableArea is what makes this behave like a title bar rather than a painted
-    // strip: without it the window can't be moved at all, since the OS bar that used to do it
-    // is gone. Double-click to maximise has to be re-added for the same reason.
-    WindowDraggableArea(
-        Modifier.onClick(onDoubleClick = { toggleMaximised(state) }) { }
-    ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .height(36.dp)
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Spacer(Modifier.width(12.dp))
-            Box(
-                Modifier.size(14.dp).clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary)
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(
-                title,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    val controller = remember(window) { WindowController(window) }
 
-            Spacer(Modifier.weight(1f))
-
-            CaptionButton(Icons.Filled.Remove, "Minimise") { state.isMinimized = true }
-            CaptionButton(
-                // The glyph names the state you're in, not the one you'd move to: two
-                // overlapping squares is the universal mark for an already-maximised window.
-                icon = if (state.placement == WindowPlacement.Maximized) Icons.Filled.FilterNone
-                       else Icons.Filled.CropSquare,
-                description = if (state.placement == WindowPlacement.Maximized) "Restore"
-                              else "Maximise",
-                onClick = { toggleMaximised(state) },
-            )
-            CaptionButton(Icons.Filled.Close, "Close", danger = true, onClick = onClose)
+    // Mirrors the window's real geometry rather than tracking our own idea of it.
+    //
+    // This is the alt-tab bug. Minimise, restore, snap and Win+Up can all be driven by the OS,
+    // and a flag the app writes when *its* button is clicked knows nothing about any of that —
+    // after one alt-tab the button offered "restore" for a window that wasn't maximised.
+    //
+    // Both listeners are needed. `WindowStateListener` hears iconify/deiconify and native
+    // maximise; `ComponentListener` hears the resizes that our own bounds-based maximise
+    // produces, which change no window *state* at all and so fire nothing else.
+    var maximised by remember(window) { mutableStateOf(controller.isMaximised) }
+    DisposableEffect(window) {
+        val onState = WindowStateListener { maximised = controller.isMaximised }
+        val onGeometry = object : ComponentAdapter() {
+            override fun componentResized(e: ComponentEvent?) { maximised = controller.isMaximised }
+            override fun componentMoved(e: ComponentEvent?) { maximised = controller.isMaximised }
         }
+        window.addWindowStateListener(onState)
+        window.addComponentListener(onGeometry)
+        onDispose {
+            window.removeWindowStateListener(onState)
+            window.removeComponentListener(onGeometry)
+        }
+    }
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(36.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .titleBarGestures(window, controller),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Spacer(Modifier.width(12.dp))
+        Box(
+            Modifier.size(14.dp).clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary)
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            title,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Spacer(Modifier.weight(1f))
+
+        CaptionButton(Icons.Filled.Remove, "Minimise") {
+            window.extendedState = window.extendedState or Frame.ICONIFIED
+        }
+        CaptionButton(
+            // The glyph names the state you're in, not the one you'd move to: two overlapping
+            // squares is the universal mark for an already-maximised window.
+            icon = if (maximised) Icons.Filled.FilterNone else Icons.Filled.CropSquare,
+            description = if (maximised) "Restore" else "Maximise",
+            onClick = { controller.toggleMaximised(); maximised = controller.isMaximised },
+        )
+        CaptionButton(Icons.Filled.Close, "Close", danger = true, onClick = onClose)
     }
 }
 
-private fun toggleMaximised(state: WindowState) {
-    state.placement =
-        if (state.placement == WindowPlacement.Maximized) WindowPlacement.Floating
-        else WindowPlacement.Maximized
-}
+/**
+ * Dragging, double-click, and snap-on-release.
+ *
+ * Compose Desktop ships `WindowDraggableArea`, and it is not enough: it moves the window and
+ * nothing else, so there is no snapping and no way to drag a maximised window loose. Both are
+ * things people do without thinking about them, so both are implemented here.
+ *
+ * Dragging a maximised window **restores it under the cursor** — grabbing the bar of a
+ * maximised window and pulling down is how you un-maximise, and a window that either refused
+ * to move or leapt away from the pointer would be worse than not supporting it.
+ */
+private fun Modifier.titleBarGestures(
+    window: ComposeWindow,
+    controller: WindowController,
+): Modifier = this
+    .pointerInput(window) {
+        detectTapGestures(onDoubleTap = { controller.toggleMaximised() })
+    }
+    .pointerInput(window) {
+        // Screen coordinates throughout. The window is moving underneath the gesture, so any
+        // offset measured relative to the window itself would feed back into its own motion.
+        var grabOffset = Point(0, 0)
+
+        detectDragGestures(
+            onDragStart = {
+                val pointer = MouseInfo.getPointerInfo()?.location ?: Point(0, 0)
+                grabOffset =
+                    if (controller.isMaximised) controller.restoreForDrag(pointer)
+                    else Point(pointer.x - window.x, pointer.y - window.y)
+            },
+            onDrag = { _, _ ->
+                val pointer = MouseInfo.getPointerInfo()?.location ?: return@detectDragGestures
+                window.setLocation(pointer.x - grabOffset.x, pointer.y - grabOffset.y)
+            },
+            onDragEnd = {
+                // Snap is decided on release, from where the pointer ended up. Deciding during
+                // the drag would need a preview overlay to be anything but startling.
+                val pointer = MouseInfo.getPointerInfo()?.location ?: return@detectDragGestures
+                val zone = snapZoneFor(pointer)
+                if (zone == SnapZone.NONE) controller.noteMoved() else controller.applySnap(zone, pointer)
+            },
+        )
+    }
 
 /**
  * One caption button, at the 46×36 the platform uses.

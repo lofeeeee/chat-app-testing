@@ -13,18 +13,9 @@ import java.io.File
 private object LocalStore {
     private const val FILE_NAME = "local-state.txt"
 
-    private val file: File by lazy {
-        val base = when {
-            System.getProperty("os.name").startsWith("Windows") ->
-                File(System.getenv("APPDATA") ?: System.getProperty("user.home"), "Singular")
-            System.getProperty("os.name").startsWith("Mac") ->
-                File(System.getProperty("user.home"), "Library/Application Support/Singular")
-            else ->
-                File(System.getProperty("user.home"), ".config/singular")
-        }
-        base.mkdirs()
-        File(base, FILE_NAME)
-    }
+    // Resolved through DataDir so `-Dsingular.dataDir` isolates this along with everything
+    // else. See DataDir for why the location is decided in one place.
+    private val file: File by lazy { DataDir.file(FILE_NAME) }
 
     // Mutable all the way down: `toMap()` and `emptyMap()` are read-only types, so the
     // delegate has to build a mutable map rather than one the setter can't write to.

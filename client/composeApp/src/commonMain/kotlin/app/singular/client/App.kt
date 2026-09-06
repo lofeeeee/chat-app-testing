@@ -23,6 +23,7 @@ import app.singular.client.net.SingularClient
 import app.singular.client.ui.buildImageLoader
 import app.singular.client.ui.ChatScreen
 import app.singular.client.ui.KeyboardScope
+import app.singular.client.ui.ProvideWindowSize
 import app.singular.client.ui.ShortcutsDialog
 import app.singular.client.ui.handleGlobalShortcut
 import app.singular.client.ui.isPress
@@ -164,6 +165,10 @@ fun App(
       Column(Modifier.fillMaxSize()) {
         titleBar()
         Surface(Modifier.weight(1f).fillMaxWidth()) {
+         // Measured once, here, and published to every screen. Wrapping inside the Surface
+         // rather than around the whole window means the title bar's height is already
+         // subtracted, so panels size against the room they can actually use.
+         ProvideWindowSize {
             // One attempt to pick up the stored session, before anything is drawn. Holding a
             // spinner for it rather than showing the login form first is the difference
             // between "the app remembered me" and a form that flashes up and vanishes.
@@ -171,14 +176,14 @@ fun App(
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
                 }
-                return@Surface
+                return@ProvideWindowSize
             }
 
             if (!state.signedIn) {
                 // No shell shortcuts before sign-in: there is nowhere to navigate to, and a
                 // stray Ctrl+D on a login form should do nothing rather than something.
                 LoginScreen(state, qr)
-                return@Surface
+                return@ProvideWindowSize
             }
 
             if (showShortcuts) ShortcutsDialog { showShortcuts = false }
@@ -231,6 +236,7 @@ fun App(
                     )
                 }
             }
+         }
         }
       }
     }

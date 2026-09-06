@@ -444,9 +444,16 @@ private fun AccountSection(state: AppState) {
             AvatarPicker(
                 size = 84.dp,
                 enabled = state.uploadProgress == null,
-                onClick = { state.changeAvatar() },
-            ) {
-                UserAvatar(user = me, label = displayName.ifBlank { me.username }, size = 84)
+                onPick = { deliver -> state.pickImage(deliver) },
+                onUpload = { cropped -> state.uploadAvatar(cropped) },
+                title = "Profile picture",
+                uploadLabel = "Upload profile picture",
+            ) { drawAt ->
+                UserAvatar(
+                    user = me,
+                    label = displayName.ifBlank { me.username },
+                    size = drawAt.value.toInt(),
+                )
             }
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -460,10 +467,11 @@ private fun AccountSection(state: AppState) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Button(
-                    onClick = { state.changeAvatar() },
-                    enabled = state.uploadProgress == null,
-                ) { Text(if (me.avatarUrl == null) "Upload a picture" else "Change picture") }
+                Text(
+                    "Click your picture to view it or upload a new one.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
 

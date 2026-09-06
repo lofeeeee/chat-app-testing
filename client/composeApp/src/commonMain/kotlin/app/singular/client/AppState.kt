@@ -583,10 +583,9 @@ class AppState(
      * thumbnailing as anything else off a user's disk. Only the finalized attachment id is
      * stored on the profile; the server signs a URL for it on read.
      */
-    fun changeAvatar() {
+    fun uploadAvatar(file: PickedFile) {
         scope.launch {
             try {
-                val file = pickFile(imagesOnly = true) ?: return@launch
                 uploadProgress = 0f
 
                 val slot = client.execute<CreateUploadData>(
@@ -1177,7 +1176,17 @@ class AppState(
      * about the photo without having already uploaded the last one. Uploading on pick would
      * leave an orphaned attachment behind every time someone re-chose.
      */
-    fun pickStoryImage(onPicked: (PickedFile) -> Unit) {
+    fun pickStoryImage(onPicked: (PickedFile) -> Unit) = pickImage(onPicked)
+
+    /**
+     * Opens the picker and hands the bytes back, uploading nothing.
+     *
+     * Every image entry point goes through this now, because picking and uploading had to come
+     * apart: an avatar is cropped between the two, and a story preview is drawn from the bytes
+     * long before anything is sent. Uploading on pick would also orphan an attachment on the
+     * server every time someone changed their mind about which photo to use.
+     */
+    fun pickImage(onPicked: (PickedFile) -> Unit) {
         scope.launch {
             // Cancelling is not an error and must not surface one.
             runCatching { pickFile(imagesOnly = true) }.getOrNull()?.let(onPicked)
@@ -1362,10 +1371,9 @@ class AppState(
      * gets the same EXIF stripping and thumbnailing as anything else that arrives from a
      * user's disk. Only the finalized attachment id is stored on the guild.
      */
-    fun changeGuildIcon(guildId: String) {
+    fun uploadGuildIcon(guildId: String, file: PickedFile) {
         scope.launch {
             try {
-                val file = pickFile(imagesOnly = true) ?: return@launch
                 uploadProgress = 0f
 
                 val slot = client.execute<CreateUploadData>(

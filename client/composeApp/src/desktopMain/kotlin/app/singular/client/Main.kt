@@ -1,11 +1,14 @@
 package app.singular.client
 
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.unit.DpSize
+import app.singular.client.platform.DataDir
 import app.singular.client.ui.SingularTitleBar
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import java.awt.Dimension
 import java.io.File
 import java.util.UUID
 
@@ -14,7 +17,7 @@ fun main() = application {
 
     Window(
         onCloseRequest = ::exitApplication,
-        title = "Singular",
+        title = if (DataDir.isEphemeral) "Singular (temporary)" else "Singular",
         state = windowState,
         // The OS bar is gone so the app can draw its own, themed one. Everything that bar did
         // — dragging, double-click to maximise, the caption buttons — now lives in
@@ -24,6 +27,14 @@ fun main() = application {
         // supplies its own only while this is true.
         resizable = true,
     ) {
+        // A floor for the layout.
+        //
+        // Undecorated windows keep Compose's resize grips, and without a minimum those will
+        // happily drag the window down to a few pixels — at which point no amount of
+        // responsive layout helps, because there is genuinely nowhere to put anything. 520x400
+        // is the smallest size the compact layout still reads at: rail, one pane, composer.
+        LaunchedEffect(window) { window.minimumSize = Dimension(520, 400) }
+
         // Point at another host with -Dsingular.server=https://chat.example.com
         val host = System.getProperty("singular.server")
 
@@ -35,7 +46,13 @@ fun main() = application {
                 ?: SingularDefaults.WS,
             // Passed in rather than wrapped around App, so the bar is drawn inside the theme
             // and follows the user's palette. The WindowScope receiver is captured from here.
-            titleBar = { SingularTitleBar(state = windowState, onClose = ::exitApplication) },
+            titleBar = {
+                SingularTitleBar(
+                    window = window,
+                    onClose = ::exitApplication,
+                    title = if (DataDir.isEphemeral) "Singular — temporary window" else "Singular",
+                )
+            },
         )
     }
 }
@@ -55,18 +72,10 @@ actual fun deviceId(): String = DeviceIdStore.current()
  * be copied between machines to impersonate a device.
  */
 private object DeviceIdStore {
-    private val file: File by lazy {
-        val base = when {
-            System.getProperty("os.name").startsWith("Windows") ->
-                File(System.getenv("APPDATA") ?: System.getProperty("user.home"), "Singular")
-            System.getProperty("os.name").startsWith("Mac") ->
-                File(System.getProperty("user.home"), "Library/Application Support/Singular")
-            else ->
-                File(System.getProperty("user.home"), ".config/singular")
-        }
-        base.mkdirs()
-        File(base, "device-id")
-    }
+    // Through DataDir, so a throwaway window gets its own install id rather than sharing the
+    // real one. Sharing would make both windows a single entry in "where you're signed in",
+    // and revoking either would sign out both.
+    private val file: File by lazy { DataDir.file("device-id") }
 
     fun current(): String {
         if (file.exists()) {

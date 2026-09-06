@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -28,6 +27,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,6 +41,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import app.singular.client.platform.PickedFile
 import androidx.compose.ui.unit.dp
 
 /**
@@ -77,7 +84,7 @@ fun <T> SettingsNav(
 ) {
     Column(
         Modifier
-            .width(240.dp)
+            .width(panelWidth(expanded = 240.dp, medium = 208.dp, compact = 172.dp))
             .fillMaxHeight()
             .background(MaterialTheme.colorScheme.surface)
             .padding(vertical = 10.dp),
@@ -154,7 +161,7 @@ fun SettingsPane(title: String, modifier: Modifier = Modifier, content: @Composa
 /** One grouped card of settings. The only container a settings section needs. */
 @Composable
 fun SettingsCard(content: @Composable () -> Unit) {
-    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
+    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {   // capped by the pane it sits in
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             content()
         }
@@ -168,51 +175,123 @@ fun SettingsCardTitle(text: String) {
 }
 
 /**
- * A picture that is also the control that changes it.
+ * A picture that opens a dialog for viewing and replacing it.
  *
- * A camera badge over the corner, because a bare circle gives no hint it is clickable — and a
- * picture that silently ignores a click is the single most common thing people report as broken
- * in a settings screen. Your avatar and a server's icon are the same widget at different sizes,
- * which is why they are one composable with a [size] rather than two near-identical ones.
+ * The camera badge is gone. It was there to prove the circle was clickable, but a badge that
+ * overlaps the very picture it describes is a poor trade — it clips the face at small sizes and
+ * it still only ever led to a file dialog, so there was no way to *look* at the picture you
+ * already had. Clicking now opens something that does both jobs, which is worth the extra step.
+ *
+ * Your avatar and a server's icon are the same widget at different sizes, which is why this is
+ * one composable with a [size] rather than two near-identical ones — and why fixing this fixed
+ * both at once.
  */
 @Composable
 fun AvatarPicker(
     size: Dp,
     enabled: Boolean,
-    onClick: () -> Unit,
-    picture: @Composable () -> Unit,
+    /** Opens the file picker and hands back what was chosen, uploading nothing. */
+    onPick: ((PickedFile) -> Unit) -> Unit,
+    /** Uploads the final, cropped bytes. */
+    onUpload: (PickedFile) -> Unit,
+    title: String = "Profile picture",
+    uploadLabel: String = "Upload profile picture",
+    /** Draws the picture at the size it is given — the circle and the dialog differ. */
+    picture: @Composable (Dp) -> Unit,
 ) {
+    var open by remember { mutableStateOf(false) }
+
+    // Set once a file has been chosen and until the crop is confirmed or cancelled. Holding it
+    // here rather than in AppState keeps a half-finished crop out of application state: back
+    // out and nothing anywhere has changed.
+    var cropping by remember { mutableStateOf<PickedFile?>(null) }
+
+    cropping?.let { file ->
+        ImageCropperDialog(
+            file = file,
+            title = "Crop $title".lowercase().replaceFirstChar { it.uppercase() },
+            onCancel = { cropping = null },
+            onConfirm = { cropped -> cropping = null; onUpload(cropped) },
+        )
+    }
+
+    if (open) {
+        AvatarDialog(
+            title = title,
+            uploadLabel = uploadLabel,
+            enabled = enabled,
+            // The view dialog closes as the picker opens: two modal windows stacked, one of
+            // them the OS file chooser, is a fight over the foreground nobody wins.
+            onUpload = { open = false; onPick { picked -> cropping = picked } },
+            onClose = { open = false },
+            picture = picture,
+        )
+    }
+
     Box(
         Modifier
             .size(size)
             .clip(CircleShape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(enabled = enabled) { open = true },
         contentAlignment = Alignment.Center,
     ) {
-        picture()
-
-        // Always on top of whichever picture is showing: the affordance has to be visible when
-        // there *is* a picture, which is exactly when you might want to replace it. The badge
-        // scales with the circle so an 84dp avatar and a 64dp icon get proportionate affordances
-        // rather than one badge size that dwarfs the smaller of the two.
-        Box(
-            Modifier
-                .align(Alignment.BottomEnd)
-                .size(size * BADGE_RATIO)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                Icons.Filled.PhotoCamera,
-                contentDescription = "Change picture",
-                modifier = Modifier.size(size * BADGE_RATIO * 0.58f),
-                tint = MaterialTheme.colorScheme.onPrimary,
-            )
-        }
+        picture(size)
     }
 }
 
-/** Camera badge diameter as a fraction of the circle's, measured off the original 84dp picker. */
-private val BADGE_RATIO = 26f / 84f
+/**
+ * The picture, big, with the one action that applies to it.
+ *
+ * Deliberately large — 220dp of picture. The whole reason to open a dialog rather than jump
+ * straight to the file chooser is to *see* what you currently have, and a thumbnail in a
+ * dialog would be the same thumbnail you just clicked.
+ *
+ * The same [picture] composable is reused rather than re-fetched, so whatever the caller draws
+ * in the circle — a remote image, initials, a server's monogram — appears here too and cannot
+ * disagree with it.
+ */
+@Composable
+private fun AvatarDialog(
+    title: String,
+    uploadLabel: String,
+    enabled: Boolean,
+    onUpload: () -> Unit,
+    onClose: () -> Unit,
+    /** Draws the picture at the size it is given — the circle and the dialog differ. */
+    picture: @Composable (Dp) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text(title) },
+        text = {
+            DialogKeys(onDismiss = onClose) {
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                ) {
+                    Box(
+                        Modifier
+                            .size(220.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        // The caller draws at whatever size it is handed, so the dialog gets
+                        // a genuinely large rendering rather than an 84dp thumbnail scaled up
+                        // into a blur.
+                        picture(220.dp)
+                    }
+
+                    Button(
+                        onClick = onUpload,
+                        enabled = enabled,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(uploadLabel) }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onClose) { Text("Close") } },
+    )
+}

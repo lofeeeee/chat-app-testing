@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
@@ -30,6 +31,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Notifications
@@ -76,12 +78,45 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.singular.client.AppState
 import app.singular.client.net.ChannelDto
 import app.singular.client.net.GuildDto
 import app.singular.client.net.UserDto
+
+/**
+ * Places a popup directly above its anchor, right edges aligned.
+ *
+ * Compose's built-in `Popup(alignment = …)` positions *within* the parent's bounds, which is
+ * no help when the panel is taller than the composer it belongs to. This measures the real
+ * content and puts its bottom-right corner on the anchor's top-right — so the picker always
+ * sits just clear of the composer, at whatever height it happens to be.
+ *
+ * Both axes are clamped into the window. A popup opened near the top of a short window would
+ * otherwise be positioned off-screen and simply never appear, which reads as a dead button.
+ */
+private val AboveAnchor = object : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val x = (anchorBounds.right - popupContentSize.width)
+            .coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
+        val y = (anchorBounds.top - popupContentSize.height)
+            .coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
+        return IntOffset(x, y)
+    }
+}
 
 @Composable
 fun ChatScreen(
@@ -146,17 +181,34 @@ fun ChatScreen(
             }
         }
 
-        ServerRail(state, Modifier.width(72.dp))
-        ChannelSidebar(
-            state, onOpenSessions, onOpenSettings, onOpenStories, onOpenMentions,
-            onOpenServerSettings, handleFocus,
-            tab, onTabChange = { tab = it },
-            Modifier.width(260.dp).fillMaxHeight(),
-        )
-        VerticalDivider()
-        Box(Modifier.weight(1f).fillMaxHeight()) {
-            if (state.selectedChannel == null) EmptyState(state)
-            else Conversation(state, composerFocus)
+        // In a narrow window the sidebar and the conversation take turns rather than both
+        // being squeezed: 72dp of rail plus 260dp of sidebar leaves a conversation column too
+        // thin to read below about 760dp. Which one shows follows what you're doing — a
+        // conversation open means you're reading it; Escape (which clears the selection) takes
+        // you back to the list.
+        val compact = LocalWindowWidth.current.isCompact
+        val showSidebar = !compact || state.selectedChannel == null
+
+        ServerRail(state, Modifier.width(panelWidth(expanded = 72.dp, medium = 72.dp, compact = 60.dp)))
+
+        if (showSidebar) {
+            ChannelSidebar(
+                state, onOpenSessions, onOpenSettings, onOpenStories, onOpenMentions,
+                onOpenServerSettings, handleFocus,
+                tab, onTabChange = { tab = it },
+                // Fills what's left when it's the only pane, so a narrow window shows a full
+                // list rather than a 260dp column beside dead space.
+                if (compact) Modifier.weight(1f).fillMaxHeight()
+                else Modifier.width(panelWidth(expanded = 260.dp, medium = 224.dp)).fillMaxHeight(),
+            )
+            VerticalDivider()
+        }
+
+        if (!compact || !showSidebar) {
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                if (state.selectedChannel == null) EmptyState(state)
+                else Conversation(state, composerFocus, showBack = compact)
+            }
         }
       }
     }
@@ -190,7 +242,7 @@ private fun statusLabel(status: String): String = when (status) {
 @Composable
 private fun AvatarWithStatus(user: UserDto, status: String, size: Int) {
     Box(Modifier.size(size.dp)) {
-        Avatar(user.id, user.label, size)
+        Avatar(user, size)
         Box(
             Modifier
                 .align(Alignment.BottomEnd)
@@ -295,6 +347,22 @@ private fun ConversationList(state: AppState) {
         return
     }
 
+    // A resolver for the sidebar, built from the people in your conversations. The message
+    // list has a richer one (it also knows message authors and the open server's roles), but
+    // the sidebar can't reach that — and a preview reading `You: <@221239599735771136>` is not
+    // a preview, so it needs its own rather than going without.
+    val previewResolver = remember(state.channels, state.currentUser?.id) {
+        MentionResolver(
+            usersById = buildMap {
+                state.channels.forEach { c -> c.members.forEach { put(it.id, it) } }
+                state.currentUser?.let { put(it.id, it) }
+            },
+            rolesById = emptyMap(),
+            channelsById = state.channels.mapNotNull { c -> c.name?.let { c.id to it } }.toMap(),
+            selfId = state.currentUser?.id,
+        )
+    }
+
     LazyColumn(Modifier.fillMaxSize()) {
         items(state.channels, key = { it.id }) { channel ->
             DirectMessageRow(
@@ -302,9 +370,11 @@ private fun ConversationList(state: AppState) {
                 selfId = state.currentUser?.id,
                 status = channel.members.firstOrNull { it.id != state.currentUser?.id }
                     ?.let(state::statusOf) ?: "OFFLINE",
-                preview = state.lastMessages[channel.id]?.preview(state.currentUser?.id),
+                preview = state.lastMessages[channel.id]
+                    ?.preview(state.currentUser?.id, previewResolver::displayFor),
                 muted = state.mutedChannels[channel.id] == true,
                 unread = state.unread[channel.id] == true,
+                mentions = state.mentionCounts[channel.id] ?: 0,
                 selected = channel.id == state.selectedChannel?.id,
                 onClick = { state.openChannel(channel) },
             )
@@ -414,6 +484,7 @@ private fun DirectMessageRow(
     preview: String?,
     muted: Boolean,
     unread: Boolean,
+    mentions: Int,
     selected: Boolean,
     onClick: () -> Unit,
 ) {
@@ -453,12 +524,17 @@ private fun DirectMessageRow(
             )
         }
 
-        if (unread) {
+        // The badge replaces the plain dot when there is one: two marks on the same row
+        // compete, and the red one is strictly more informative.
+        if (mentions > 0) {
+            MentionBadge(mentions)
+            Spacer(Modifier.width(4.dp))
+        } else if (unread) {
             Box(
                 Modifier
                     .size(8.dp)
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary)
+                    .background(MaterialTheme.colorScheme.onSurface)
             )
             Spacer(Modifier.width(4.dp))
         }
@@ -553,6 +629,12 @@ private fun LazyListScope.channelGroup(
     isCollapsed: Boolean,
     onToggle: () -> Unit,
 ) {
+    // While a category is folded shut it speaks for its children: their unread state and their
+    // mention count surface on the header, because a badge on a row nobody can see is the same
+    // as no badge. Expanding hands both back to the individual channels.
+    val rolledUpUnread = isCollapsed && state.categoryHasUnread(channels)
+    val rolledUpMentions = if (isCollapsed) state.categoryMentionCount(channels) else 0
+
     item(key = "cat-$id") {
         Row(
             Modifier
@@ -578,10 +660,16 @@ private fun LazyListScope.channelGroup(
                 label.uppercase(),
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                // Brighter on dark, darker on light — `onSurface` against `onSurfaceVariant`
+                // is exactly that in both modes, so it needs no per-theme branch.
+                color = if (rolledUpUnread) MaterialTheme.colorScheme.onSurface
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
             )
+            Spacer(Modifier.width(6.dp))
+            MentionBadge(rolledUpMentions)
         }
     }
 
@@ -592,6 +680,7 @@ private fun LazyListScope.channelGroup(
             channel = channel,
             selected = channel.id == state.selectedChannel?.id,
             unread = state.unread[channel.id] == true,
+            mentions = state.mentionCounts[channel.id] ?: 0,
             muted = state.mutedChannels[channel.id] == true,
             onClick = { state.openChannel(channel) },
         )
@@ -603,6 +692,7 @@ private fun GuildChannelRow(
     channel: ChannelDto,
     selected: Boolean,
     unread: Boolean,
+    mentions: Int,
     muted: Boolean,
     onClick: () -> Unit,
 ) {
@@ -618,21 +708,27 @@ private fun GuildChannelRow(
             .padding(horizontal = 8.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Brighter on dark, darker on light: `onSurface` is the high-contrast ink in both
+        // modes and `onSurfaceVariant` the muted one, so one expression covers both themes.
+        val ink =
+            if (selected || unread) MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.onSurfaceVariant
+
         // The hash is drawn as text at the same size as the name, so it reads as part of the
-        // channel's name the way it does everywhere else this convention is used.
+        // channel's name the way it does everywhere else this convention is used. It brightens
+        // with the name — leaving it muted made an unread channel look half-lit.
         Text(
             "#",
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = ink,
         )
         Spacer(Modifier.width(7.dp))
         Text(
             channel.name.orEmpty(),
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = if (selected || unread) FontWeight.SemiBold else FontWeight.Normal,
-            color = if (selected || unread) MaterialTheme.colorScheme.onSurface
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = ink,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
@@ -644,11 +740,16 @@ private fun GuildChannelRow(
                 modifier = Modifier.size(14.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-        } else if (unread) {
-            Box(
-                Modifier.size(7.dp).clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary)
-            )
+        } else {
+            // The badge replaces the plain dot when there is one — two marks for the same row
+            // compete, and the red one is strictly more informative.
+            if (mentions > 0) MentionBadge(mentions)
+            else if (unread) {
+                Box(
+                    Modifier.size(7.dp).clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.onSurface)
+                )
+            }
         }
     }
 }
@@ -779,7 +880,12 @@ private fun ProfileBar(
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun Conversation(state: AppState, composerFocus: FocusRequester) {
+private fun Conversation(
+    state: AppState,
+    composerFocus: FocusRequester,
+    /** True when this pane replaced the sidebar, so it must offer a way back to it. */
+    showBack: Boolean = false,
+) {
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val channel = state.selectedChannel ?: return
@@ -807,8 +913,14 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
         val channelNames = state.selectedGuild?.channels
             ?.filter { !it.isCategory && it.name != null }
             ?.associate { it.id to it.name!! } ?: emptyMap()
-        MentionResolver(users, roles, channelNames, state.currentUser?.id)
+        MentionResolver(
+            users, roles, channelNames, state.currentUser?.id,
+            myRoleIds = state.selectedGuild?.me?.roles?.map { it.id }?.toSet().orEmpty(),
+        )
     }
+
+    // The plate behind a mention, in the composer and the message list alike.
+    val mentionTint = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
 
     LaunchedEffect(state.messages.size, channel.id) {
         if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
@@ -821,9 +933,22 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
 
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth().padding(
+                start = if (showBack) 4.dp else 16.dp, end = 16.dp, top = 10.dp, bottom = 10.dp,
+            ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Only when this pane has replaced the sidebar. Escape already does this, but a
+            // layout that hides the list needs a visible way back — a keyboard shortcut is not
+            // an affordance.
+            if (showBack) {
+                IconButton(onClick = { state.closeChannel() }) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back to conversations",
+                    )
+                }
+            }
             other?.let { AvatarWithStatus(it, state.statusOf(it), 32) }
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
@@ -901,7 +1026,14 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
         // The caret is approximated as the end of the draft — the compose text field doesn't
         // expose caret position through onValueChange, and typing at the end is the normal case.
         val token = activeMentionToken(draft, draft.length)
-        val candidates = if (token != null) {
+
+        // Escape closes the popup without clearing what you typed. Keyed on the token's start
+        // so beginning a *new* mention re-opens it — otherwise one Escape would suppress
+        // autocomplete for the rest of the message.
+        var dismissedAt by remember { mutableStateOf<Int?>(null) }
+        if (token == null) dismissedAt = null
+
+        val candidates = if (token != null && dismissedAt != token.start) {
             mentionCandidates(
                 query = token.query,
                 members = state.channelMembers,
@@ -911,9 +1043,46 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
             )
         } else emptyList()
 
+        // Which row the arrows are on. Reset whenever the query changes, because the list
+        // underneath has been rebuilt and index 3 of the old list means nothing in the new one.
+        var highlighted by remember { mutableStateOf(0) }
+        remember(token?.start, token?.query) { highlighted = 0; true }
+        val active = highlighted.coerceIn(0, (candidates.size - 1).coerceAtLeast(0))
+
+        val accept = { candidate: MentionCandidate ->
+            val (text, _) = applyMention(draft, token!!, candidate)
+            draft = text
+            dismissedAt = null
+        }
+
         Box {
-            Column {
-                if (pickerTarget == "composer") {
+            // A real Popup, not an offset Box.
+            //
+            // Two things an in-tree overlay could not do. **Z-order**: a Box drawn inside the
+            // composer still shares the conversation's draw order, so message bubbles above it
+            // painted straight over the panel. A Popup composes into its own layer, above
+            // everything in the window, which is the whole reason the API exists.
+            //
+            // **Placement**: the offset version used a hand-tuned -282dp to clear the
+            // composer, which was a magic number that would drift the moment the panel's
+            // height changed. AboveAnchor measures the real content and puts its bottom-right
+            // corner on the composer's top-right, so it is correct at any size.
+            if (pickerTarget == "composer") {
+                Popup(
+                    popupPositionProvider = AboveAnchor,
+                    onDismissRequest = {
+                        pickerTarget = null
+                        // Hand focus back to where you were typing. The popup took it in order
+                        // to hear the outside click, so without this the composer is left
+                        // unfocused and the next keystroke goes nowhere.
+                        runCatching { composerFocus.requestFocus() }
+                    },
+                    // `focusable = true` is what makes clicking away close it. A non-focusable
+                    // popup never receives the outside click at all, so `onDismissRequest`
+                    // simply never fires — which is why the panel stayed open. It also brings
+                    // Escape along, since a focusable popup gets the key first.
+                    properties = PopupProperties(focusable = true),
+                ) {
                     EmojiPicker(
                         recents = recents,
                         onPick = { emoji ->
@@ -921,12 +1090,16 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
                             state.onTyping()
                         },
                         onClose = { pickerTarget = null },
-                        modifier = Modifier
-                            .padding(horizontal = 12.dp, vertical = 4.dp)
-                            .fillMaxWidth(),
+                        // Never wider than the window it floats over, or a narrow window
+                        // gets a panel clipped at both edges.
+                        modifier = Modifier.width(
+                            cappedWidth(max = 320.dp, fractionOfWindow = 0.9f, floor = 240.dp)
+                        ),
                     )
                 }
+            }
 
+            Column {
                 if (pickerTarget != null && pickerTarget != "composer") {
                     ReactionSheet(
                         recents = recents,
@@ -944,15 +1117,6 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
                     Modifier.fillMaxWidth().padding(12.dp),
                     verticalAlignment = Alignment.Bottom,
                 ) {
-                    IconButton(
-                        onClick = {
-                            pickerTarget = if (pickerTarget == "composer") null else "composer"
-                        },
-                    ) {
-                        Text("😀", fontSize = 22.sp)
-                    }
-                    Spacer(Modifier.width(4.dp))
-
                     Column(Modifier.weight(1f)) {
                         OutlinedTextField(
                             value = draft,
@@ -969,16 +1133,32 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
                                 // sends, or it inserts a newline first and leaves a blank line behind.
                                 .onPreviewKeyEvent { event ->
                                     val isEnter = event.key == Key.Enter || event.key == Key.NumPadEnter
+                                    val open = candidates.isNotEmpty()
                                     when {
                                         !event.isPress -> false
-                                        !isEnter -> false
-                                        // Enter with the autocomplete open picks the top candidate.
-                                        candidates.isNotEmpty() -> {
-                                            applyMention(draft, token!!, candidates.first()).let { (text, _) ->
-                                                draft = text
-                                            }
+
+                                        // While the popup is open the arrows belong to it, not
+                                        // to the text field — the caret is inside a token you
+                                        // are still choosing, so there is nowhere useful for
+                                        // Up/Down to move it anyway. Wrapping rather than
+                                        // clamping: eight rows is short enough that running off
+                                        // one end and reappearing at the other beats reversing.
+                                        open && event.key == Key.DirectionDown -> {
+                                            highlighted = (active + 1) % candidates.size; true
+                                        }
+                                        open && event.key == Key.DirectionUp -> {
+                                            highlighted = (active - 1 + candidates.size) % candidates.size
                                             true
                                         }
+                                        open && event.key == Key.Tab -> {
+                                            accept(candidates[active]); true
+                                        }
+                                        open && event.key == Key.Escape -> {
+                                            dismissedAt = token?.start; true
+                                        }
+                                        open && isEnter -> { accept(candidates[active]); true }
+
+                                        !isEnter -> false
                                         // Shift+Enter falls through so the field inserts the newline itself.
                                         event.isShiftPressed -> false
                                         else -> {
@@ -987,6 +1167,11 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
                                         }
                                     }
                                 },
+                            // Draws `@Orbit` over the `<@221…>` the draft actually holds. The
+                            // value stays in the wire format — see MentionVisualTransformation.
+                            visualTransformation = remember(resolver.revision, mentionTint) {
+                                MentionVisualTransformation(resolver, mentionTint)
+                            },
                             maxLines = 6,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                             keyboardActions = KeyboardActions(onSend = {
@@ -1004,14 +1189,19 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
                                 modifier = Modifier.padding(top = 4.dp).fillMaxWidth(),
                             ) {
                                 Column {
-                                    candidates.forEach { candidate ->
+                                    candidates.forEachIndexed { index, candidate ->
                                         Row(
                                             Modifier
                                                 .fillMaxWidth()
-                                                .clickable {
-                                                    val (text, _) = applyMention(draft, token!!, candidate)
-                                                    draft = text
-                                                }
+                                                // The arrow selection and the click target are
+                                                // the same row, so keyboard and mouse can't
+                                                // disagree about what "this one" means.
+                                                .background(
+                                                    if (index == active)
+                                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                                    else Color.Transparent
+                                                )
+                                                .clickable { accept(candidate) }
                                                 .padding(horizontal = 12.dp, vertical = 8.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
@@ -1053,6 +1243,16 @@ private fun Conversation(state: AppState, composerFocus: FocusRequester) {
                     }
 
                     Spacer(Modifier.width(4.dp))
+                    // Emoji, then attach, then send. All three act on the message being
+                    // written, so they belong on the same side of the field — the emoji button
+                    // alone on the left split one group of controls across two places.
+                    IconButton(
+                        onClick = {
+                            pickerTarget = if (pickerTarget == "composer") null else "composer"
+                        },
+                    ) {
+                        Text("😀", fontSize = 22.sp)
+                    }
                     IconButton(
                         onClick = { state.attachAndSend(draft); draft = "" },
                         enabled = state.uploadProgress == null,

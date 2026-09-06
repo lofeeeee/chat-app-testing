@@ -20,20 +20,9 @@ private object SecureStore {
 
     private val isWindows = System.getProperty("os.name").orEmpty().startsWith("Windows")
 
-    private val dir: File by lazy {
-        val base = when {
-            isWindows ->
-                File(System.getenv("APPDATA") ?: System.getProperty("user.home"), "Singular")
-            System.getProperty("os.name").startsWith("Mac") ->
-                File(System.getProperty("user.home"), "Library/Application Support/Singular")
-            else ->
-                File(System.getProperty("user.home"), ".config/singular")
-        }
-        base.mkdirs()
-        base
-    }
-
-    private fun fileFor(key: String) = File(dir, "$key.secret")
+    // Through DataDir, so a window started with `-Dsingular.dataDir` reads and writes its own
+    // token file and cannot see — or clobber — the real one.
+    private fun fileFor(key: String) = DataDir.file("$key.secret")
 
     fun read(key: String): String? = runCatching {
         val file = fileFor(key)

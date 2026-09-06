@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.singular.client.AppState
 import app.singular.client.net.ChannelDto
 import app.singular.client.net.GuildDto
@@ -216,14 +217,17 @@ private fun OverviewSection(
             AvatarPicker(
                 size = 64.dp,
                 enabled = editable && state.uploadProgress == null,
-                onClick = { state.changeGuildIcon(guild.id) },
-            ) {
-                GuildIconOrInitials(guild)
+                onPick = { deliver -> state.pickImage(deliver) },
+                onUpload = { cropped -> state.uploadGuildIcon(guild.id, cropped) },
+                title = "Server icon",
+                uploadLabel = "Upload server icon",
+            ) { drawAt ->
+                GuildIconOrInitials(guild, drawAt)
             }
             Spacer(Modifier.width(14.dp))
             Column {
                 Text(
-                    if (editable) "Click the icon to upload a picture."
+                    if (editable) "Click the icon to view or replace it."
                     else "Only members who can manage this server may change it.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -771,7 +775,7 @@ private fun MyProfileSection(
 
 /** The guild's icon, or its initials until it has one — [AvatarPicker]'s picture half. */
 @Composable
-private fun GuildIconOrInitials(guild: GuildDto) {
+private fun GuildIconOrInitials(guild: GuildDto, drawAt: androidx.compose.ui.unit.Dp = 64.dp) {
     val url = guild.iconUrl
     if (url != null) {
         RemoteImage(
@@ -780,14 +784,17 @@ private fun GuildIconOrInitials(guild: GuildDto) {
             // fetch, so caching against it would miss every single time.
             stableKey = guild.iconKey ?: guild.id,
             contentDescription = "${guild.name} icon",
-            modifier = Modifier.size(64.dp),
+            modifier = Modifier.size(drawAt).clip(CircleShape),
         )
     } else {
         // Initials rather than a generic placeholder glyph, so a server without an icon is
-        // still distinguishable from the other servers without one.
+        // still distinguishable from the other servers without one. The type scales with the
+        // circle so the 220dp dialog doesn't show a monogram sized for a 64dp tile.
         Text(
             guild.initials,
             style = MaterialTheme.typography.titleMedium,
+            fontSize = (drawAt.value * 0.32f).sp,
+            lineHeight = (drawAt.value * 0.38f).sp,
             fontWeight = FontWeight.SemiBold,
         )
     }

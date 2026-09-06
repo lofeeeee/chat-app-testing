@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -136,33 +137,24 @@ fun StoryEditor(state: AppState, onClose: () -> Unit) {
         }
         HorizontalDivider()
 
-        Row(Modifier.fillMaxSize()) {
-            // The preview gets the room and the inspector gets a fixed column. The other way
-            // round — a preview squeezed into whatever is left — is what makes editors feel
-            // like forms.
-            Box(
-                Modifier.weight(1f).fillMaxHeight().padding(24.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                StoryPreview(
-                    mode = mode,
-                    background = background,
-                    image = image,
-                    overlays = overlays(),
-                )
-            }
+        // Side by side when there is room; stacked when there isn't.
+        //
+        // A 9:16 preview beside a 320dp inspector needs roughly 700dp before the preview stops
+        // being a sliver. Below that the two stack, preview on top — which is also how every
+        // phone story editor is laid out, so it isn't a compromise so much as the other
+        // correct answer.
+        val stacked = LocalWindowWidth.current.isCompact
 
-            HorizontalDivider(Modifier.width(1.dp).fillMaxHeight())
+        val preview: @Composable () -> Unit = {
+            StoryPreview(
+                mode = mode,
+                background = background,
+                image = image,
+                overlays = overlays(),
+            )
+        }
 
-            Column(
-                Modifier
-                    .width(320.dp)
-                    .fillMaxHeight()
-                    .background(MaterialTheme.colorScheme.surface)
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
+        val inspector: @Composable ColumnScope.() -> Unit = {
                 ModePicker(mode) { picked ->
                     mode = picked
                     if (picked == StoryMode.TEXT) image = null
@@ -219,6 +211,52 @@ fun StoryEditor(state: AppState, onClose: () -> Unit) {
                     HorizontalDivider()
                     TextInspector(element) { updated -> elements[selected] = updated }
                 }
+        }
+
+        if (stacked) {
+            Column(
+                Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+            ) {
+                // A fixed slice of height rather than `weight`: this column scrolls, so a
+                // weighted child would have no bounded height to divide.
+                Box(
+                    Modifier.fillMaxWidth().height(320.dp).padding(16.dp),
+                    contentAlignment = Alignment.Center,
+                ) { preview() }
+
+                HorizontalDivider()
+
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    content = inspector,
+                )
+            }
+        } else {
+            Row(Modifier.fillMaxSize()) {
+                // The preview gets the room and the inspector gets a fixed column. The other
+                // way round — a preview squeezed into whatever is left — is what makes editors
+                // feel like forms.
+                Box(
+                    Modifier.weight(1f).fillMaxHeight().padding(24.dp),
+                    contentAlignment = Alignment.Center,
+                ) { preview() }
+
+                HorizontalDivider(Modifier.width(1.dp).fillMaxHeight())
+
+                Column(
+                    Modifier
+                        .width(panelWidth(expanded = 320.dp, medium = 288.dp))
+                        .fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.surface)
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    content = inspector,
+                )
             }
         }
     }
