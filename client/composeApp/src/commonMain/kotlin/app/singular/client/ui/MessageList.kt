@@ -351,13 +351,18 @@ fun MessageList(
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         items(rendered, key = { it.message.id }) { row ->
-            // A little air between runs, none within one. This spacing is what actually makes
-            // grouping read as grouping.
-            if (row.startsGroup) Spacer(Modifier.size(10.dp))
+            // New messages settle in with a short fade; reduced motion turns it off.
+            Box(if (LocalReducedMotion.current) Modifier else Modifier.animateItem()) {
+                // A little air between runs, none within one. This spacing is what actually
+                // makes grouping read as grouping.
+                Column {
+                    if (row.startsGroup) Spacer(Modifier.size(10.dp))
 
-            when (layout) {
-                ChatLayout.BUBBLES -> BubbleRow(row, resolver, onReact, onMessageLongPress)
-                ChatLayout.COMPACT -> CompactRow(row, resolver, onReact, onMessageLongPress)
+                    when (layout) {
+                        ChatLayout.BUBBLES -> BubbleRow(row, resolver, onReact, onMessageLongPress)
+                        ChatLayout.COMPACT -> CompactRow(row, resolver, onReact, onMessageLongPress)
+                    }
+                }
             }
         }
     }

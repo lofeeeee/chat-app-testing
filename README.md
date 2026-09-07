@@ -181,12 +181,12 @@ Numbered against the original feature list.
 | # | Feature | State |
 |---|---|---|
 | 1 | Private DM | ✅ |
-| 2 | Group DM | 🟡 schema + channel type; no group-creation UI |
+| 2 | Group DM | ✅ creation (up to 9 others), owner, member picker from your DM contacts |
 | 3 | Servers | ✅ create, channels, categories, invites, leave, delete |
 | 4 | Online / Away / DND / Offline | ✅ + Invisible, with heartbeat |
 | 5 | Stories (WhatsApp/Insta style) | ✅ tray, composer, viewer, overlay compositor |
-| 6 | Emoji / files / audio / location | ✅ emoji picker (grid, search, recents) with a bundled Noto Color Emoji face; files/audio/location via presigned upload |
-| 7 | Push notifications | 🟡 registration + mute/DND filter done; delivery needs your FCM/APNs keys |
+| 6 | Emoji / files / audio / location | ✅ emoji picker (grid, search, recents) with a bundled Noto Color Emoji face; files/**voice notes**/location via presigned upload — records, encodes, ships peaks with the message, plays back in place |
+| 7 | Push notifications | 🟡 server side complete (registration, mute/DND, outbox, FCM/APNs/Web Push transports, worker). No device token yet: Android's requires Firebase, which this project doesn't vendor |
 | 8 | IP/device/agent + action logging | ✅ per-session, not per-message |
 | 9 | "Hashing" | ✅ split into hash vs encrypt |
 | 10 | Server roles | ✅ 128-bit bitfield, hierarchy, channel overwrites |
@@ -197,29 +197,29 @@ Numbered against the original feature list.
 | 15 | Blocked-but-shared collapse | ✅ both layouts |
 | 16 | Custom primary + secondary colour | ✅ in Settings, with a contrast floor |
 | 17 | Rich presence | ✅ volatile, with a staleness ceiling |
-| 18 | Server folders | ✅ server-side; no drag-and-drop UI yet |
+| 18 | Server folders | ✅ drag-and-drop: reorder, drop-on-tile to group, collapse a folder to one stack tile, rename, remove |
 | 19 | Custom server icon | ✅ |
 | 20 | Music on stories | 🟡 overlay model supports it; needs a licensed source |
 
 Plus, not on the original list: QR sign-in with a 20s rotating code, session/device management,
 typing indicators, two chat layouts, Enter-to-send, **emoji reactions** (chips under messages,
-long-press quick-react, live counts over `reactionUpdated`), **custom emoji+text status**, and
-**story stickers** (emoji overlays from the picker).
+long-press quick-react, live counts over `reactionUpdated`), **custom emoji+text status**,
+**story stickers** (emoji overlays from the picker), **animated screen transitions, dialogs and
+list items** (with a reduced-motion switch under Appearance), **direct manipulation of story
+overlays** (drag, pinch, rotate), and **Android system-back wired to the same chain as Esc**.
 
 ### What's left
 
-- **Push delivery.** Registration, the mute/DND filter, and fanout are all real. Only the final
-  hop is a `LoggingPushTransport` stub — Apple and Google own the only sockets to a sleeping
-  phone, and that needs your credentials.
+- **A device push token.** Everything on the server is done and provider-agnostic; the client's
+  `registerPushToken(platform, token)` is the seam. Android's token needs the Firebase SDK, which
+  is the one dependency this project can't vendor — so this is a decision, not a TODO.
 - **A licensing decision for music-on-stories.** The overlay model already carries a music
   widget, but streaming a commercial clip needs a label deal. Realistic options: user-uploaded
   audio, or metadata plus a deep link into the listener's own music app.
-- **Voice recording.** Voice notes are modelled, uploaded, and rendered from precomputed peaks;
-  capturing audio needs a platform recorder (`AudioRecord` on Android, `javax.sound` on desktop)
-  plus Opus encoding.
-- **Direct manipulation of story overlays.** The composer places a caption and the viewer draws
-  every overlay type; dragging, pinching, and rotating them on the image isn't wired yet. The
-  data model already carries `x`, `y`, `rot`, `scale`, so this is a gesture handler, not a redesign.
+- **iOS.** Compose Multiplatform has been Stable on iOS since 1.8.0 — a scheduling decision.
+- **Opus on desktop voice notes.** Android records AAC via `MediaRecorder`; desktop writes WAV
+  because the JVM has no Opus encoder and the pure-Java one is codec-only (no Ogg muxing). Fine
+  at the upload ceiling, and `AudioRecorder.desktop.kt` is the one file to change.
 
 ## How it's built
 

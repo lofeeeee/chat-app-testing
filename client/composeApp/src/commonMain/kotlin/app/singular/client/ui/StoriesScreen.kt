@@ -55,9 +55,8 @@ import app.singular.client.net.StoryDto
  * possible answer to "did mine go up?".
  */
 @Composable
-fun StoriesScreen(state: AppState, onClose: () -> Unit) {
+fun StoriesScreen(state: AppState, onCompose: () -> Unit, onClose: () -> Unit) {
     var open by remember { mutableStateOf<StoryDto?>(null) }
-    var composing by remember { mutableStateOf(false) }
 
     val me = state.currentUser?.id
     val mine = state.stories.filter { it.author.id == me }
@@ -75,13 +74,9 @@ fun StoriesScreen(state: AppState, onClose: () -> Unit) {
         )
     }
 
-    // A full screen, not a dialog — it owns the whole view while it's open. See StoryEditor
-    // for why a live preview and its controls can't share a dialog.
-    if (composing) {
-        StoryEditor(state) { composing = false }
-        return
-    }
-
+    // The composer is a route of its own (pushed by [onCompose]) rather than a local mode:
+    // Escape then unwinds editor → stories list → chat one level at a time, instead of
+    // closing the whole screen from inside the editor.
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(start = 8.dp, end = 20.dp, top = 10.dp, bottom = 10.dp),
@@ -118,7 +113,7 @@ fun StoriesScreen(state: AppState, onClose: () -> Unit) {
                 MyStatusRow(
                     latest = mine.firstOrNull(),
                     busy = state.uploadProgress != null,
-                    onAdd = { composing = true },
+                    onAdd = onCompose,
                     onOpen = { mine.firstOrNull()?.let { open = it } },
                 )
             }

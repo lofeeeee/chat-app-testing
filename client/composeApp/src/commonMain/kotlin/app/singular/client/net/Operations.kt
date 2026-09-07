@@ -119,6 +119,22 @@ object Operations {
         }
     """
 
+    // Feature 7. Android-only in practice — desktop notifies over the socket — but the
+    // operation lives with the rest so the schema surface is in one file.
+    val REGISTER_PUSH_TOKEN = """
+        mutation RegisterPushToken(${'$'}platform: String!, ${'$'}token: String!, ${'$'}deviceId: String) {
+            registerPushToken(platform: ${'$'}platform, token: ${'$'}token, deviceId: ${'$'}deviceId)
+        }
+    """
+
+    val CREATE_GROUP_DM = """
+        $USER_FIELDS
+        $CHANNEL_FIELDS
+        mutation CreateGroupDm(${'$'}userIds: [Snowflake!]!, ${'$'}name: String) {
+            createGroupDm(userIds: ${'$'}userIds, name: ${'$'}name) { ...ChannelFields }
+        }
+    """
+
     val USER_BY_HANDLE = """
         $USER_FIELDS
         query ByHandle(${'$'}username: String!, ${'$'}discriminator: Int!) {
@@ -477,6 +493,21 @@ object GuildOperations {
         $USER_FIELDS
         $GUILD_FIELDS
         query Guilds { guilds { ...GuildFields } }
+    """
+
+    // Feature 18. Folders are a per-user view preference, so there is no membership to fetch
+    // alongside them — one row of JSONB, read once at sign-in, written on drop.
+    val FOLDERS = """
+        query Folders { folders { folders { id name color guildIds } loose } }
+    """
+
+    val SAVE_FOLDERS = """
+        mutation SaveFolders(${'$'}folders: [GuildFolderInput!]!, ${'$'}loose: [Snowflake!]!) {
+            saveFolders(folders: ${'$'}folders, loose: ${'$'}loose) {
+                folders { id name color guildIds }
+                loose
+            }
+        }
     """
 
     val CREATE_GUILD = """

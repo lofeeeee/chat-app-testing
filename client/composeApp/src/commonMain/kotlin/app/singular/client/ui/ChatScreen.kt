@@ -40,6 +40,8 @@ import androidx.compose.material.icons.filled.AmpStories
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.GroupAdd
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -59,6 +61,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -172,6 +175,13 @@ fun ChatScreen(
             }
         }
     ) {
+      // The Android system back runs the same chain as Escape: overlay interceptors (reaction
+      // sheet, autocomplete — registered inside Conversation) first, then this screen's own
+      // layer of closing the open conversation.
+      val backDispatcher = LocalBackDispatcher.current
+      SystemBackHandler(enabled = state.selectedChannel != null) {
+        if (backDispatcher?.dispatch() != true) state.closeChannel()
+      }
       Row(Modifier.fillMaxSize()) {
         // Requested a frame late, once the Friends tab has actually placed the field.
         if (pendingHandleFocus) {
@@ -206,6 +216,11 @@ fun ChatScreen(
 
         if (!compact || !showSidebar) {
             Box(Modifier.weight(1f).fillMaxHeight()) {
+                // No crossfade here, deliberately: the message list is shared AppState that is
+                // replaced on channel switch, so an outgoing pane would render the *new*
+                // channel's data mid-transition — a fade from one thing to itself. Route
+                // transitions (App) and list items animate; conversation switching stays
+                // instant, which is also what every chat app does.
                 if (state.selectedChannel == null) EmptyState(state)
                 else Conversation(state, composerFocus, showBack = compact)
             }
@@ -240,7 +255,7 @@ private fun statusLabel(status: String): String = when (status) {
  * it lands on, which is a property `surface` doesn't guarantee.
  */
 @Composable
-private fun AvatarWithStatus(user: UserDto, status: String, size: Int) {
+internal fun AvatarWithStatus(user: UserDto, status: String, size: Int) {
     Box(Modifier.size(size.dp)) {
         Avatar(user, size)
         Box(
@@ -312,6 +327,19 @@ private fun DirectMessageHome(
     handleFocus: FocusRequester,
     onTabChange: (HomeTab) -> Unit,
 ) {
+    var creatingGroup by remember { mutableStateOf(false) }
+
+    if (creatingGroup) {
+        GroupDmDialog(
+            state = state,
+            onDismiss = { creatingGroup = false },
+            onCreate = { userIds, name ->
+                creatingGroup = false
+                state.createGroupDm(userIds, name)
+            },
+        )
+    }
+
     Column(Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = tab.ordinal) {
             Tab(
@@ -327,22 +355,26 @@ private fun DirectMessageHome(
         }
 
         when (tab) {
-            HomeTab.CHATS -> ConversationList(state)
-            HomeTab.FRIENDS -> FriendsTab(state, handleFocus)
+            HomeTab.CHATS -> ConversationList(state, onNewGroup = { creatingGroup = true })
+            HomeTab.FRIENDS -> FriendsTab(state, handleFocus, onNewGroup = { creatingGroup = true })
         }
     }
 }
 
 @Composable
-private fun ConversationList(state: AppState) {
+private fun ConversationList(state: AppState, onNewGroup: () -> Unit) {
     if (state.channels.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-            Text(
-                "No conversations yet. Open the Friends tab to start one.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "No conversations yet. Open the Friends tab to start one.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(10.dp))
+                TextButton(onClick = onNewGroup) { Text("Or start a group") }
+            }
         }
         return
     }
@@ -365,19 +397,21 @@ private fun ConversationList(state: AppState) {
 
     LazyColumn(Modifier.fillMaxSize()) {
         items(state.channels, key = { it.id }) { channel ->
-            DirectMessageRow(
-                channel = channel,
-                selfId = state.currentUser?.id,
-                status = channel.members.firstOrNull { it.id != state.currentUser?.id }
-                    ?.let(state::statusOf) ?: "OFFLINE",
-                preview = state.lastMessages[channel.id]
-                    ?.preview(state.currentUser?.id, previewResolver::displayFor),
-                muted = state.mutedChannels[channel.id] == true,
-                unread = state.unread[channel.id] == true,
-                mentions = state.mentionCounts[channel.id] ?: 0,
-                selected = channel.id == state.selectedChannel?.id,
-                onClick = { state.openChannel(channel) },
-            )
+            Box(Modifier.animateItem()) {
+                DirectMessageRow(
+                    channel = channel,
+                    selfId = state.currentUser?.id,
+                    status = channel.members.firstOrNull { it.id != state.currentUser?.id }
+                        ?.let(state::statusOf) ?: "OFFLINE",
+                    preview = state.lastMessages[channel.id]
+                        ?.preview(state.currentUser?.id, previewResolver::displayFor),
+                    muted = state.mutedChannels[channel.id] == true,
+                    unread = state.unread[channel.id] == true,
+                    mentions = state.mentionCounts[channel.id] ?: 0,
+                    selected = channel.id == state.selectedChannel?.id,
+                    onClick = { state.openChannel(channel) },
+                )
+            }
         }
     }
 }
@@ -390,18 +424,14 @@ private fun ConversationList(state: AppState) {
  * changed except where it lives.
  */
 @Composable
-private fun FriendsTab(state: AppState, handleFocus: FocusRequester) {
+private fun FriendsTab(state: AppState, handleFocus: FocusRequester, onNewGroup: () -> Unit) {
     var handle by remember { mutableStateOf("") }
-    val selfId = state.currentUser?.id
     val focus = LocalFocusManager.current
 
     // Everyone you already have a 1:1 conversation with. That is the whole friend list this
     // app has — there is no accept/decline request flow yet, and inventing an empty one here
     // would be a screen that never has anything in it.
-    val friends = state.channels
-        .filter { it.type == "DM" }
-        .mapNotNull { channel -> channel.members.firstOrNull { it.id != selfId } }
-        .distinctBy { it.id }
+    val friends = state.dmContacts()
 
     val open = { state.openDmWithHandle(handle.trim()); handle = "" }
 
@@ -410,19 +440,29 @@ private fun FriendsTab(state: AppState, handleFocus: FocusRequester) {
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            OutlinedTextField(
-                value = handle,
-                onValueChange = { handle = it },
-                label = { Text("Add by handle") },
-                placeholder = { Text("orbit#2989") },
-                singleLine = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .focusRequester(handleFocus)
-                    .formField(focus, enabled = handle.contains('#'), onConfirm = open),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                keyboardActions = KeyboardActions(onGo = { open() }),
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = handle,
+                    onValueChange = { handle = it },
+                    label = { Text("Add by handle") },
+                    placeholder = { Text("orbit#2989") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(handleFocus)
+                        .formField(focus, enabled = handle.contains('#'), onConfirm = open),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { open() }),
+                )
+                Spacer(Modifier.width(8.dp))
+                IconButton(onClick = onNewGroup) {
+                    Icon(
+                        Icons.Filled.GroupAdd,
+                        contentDescription = "New group conversation",
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
             Text(
                 "Their handle is on their profile — press Enter to open the conversation.",
                 style = MaterialTheme.typography.labelSmall,
@@ -438,6 +478,7 @@ private fun FriendsTab(state: AppState, handleFocus: FocusRequester) {
                 Row(
                     Modifier
                         .fillMaxWidth()
+                        .animateItem()
                         .clickable {
                             state.channels
                                 .firstOrNull { c -> c.members.any { it.id == person.id } }
@@ -886,10 +927,16 @@ private fun Conversation(
     /** True when this pane replaced the sidebar, so it must offer a way back to it. */
     showBack: Boolean = false,
 ) {
-    var draft by remember { mutableStateOf("") }
+    // Drafts are kept per channel: one shared `remember` meant switching chats carried the
+    // half-written message into the wrong conversation, and a bare `remember(channel.id)`
+    // meant leaving and returning threw it away. The map gives each channel its own draft for
+    // as long as this screen is alive.
+    val drafts = remember { mutableStateMapOf<String, String>() }
     val listState = rememberLazyListState()
     val channel = state.selectedChannel ?: return
     val other = channel.members.firstOrNull { it.id != state.currentUser?.id }
+    var draft by remember(channel.id) { mutableStateOf(drafts[channel.id].orEmpty()) }
+    LaunchedEffect(channel.id, draft) { drafts[channel.id] = draft }
 
     // @-autocomplete state. The token is recomputed from the draft on every change; the
     // popup is shown exactly while a token is active and something matches it.
@@ -1055,6 +1102,35 @@ private fun Conversation(
             dismissedAt = null
         }
 
+    // Feature 6. The recorder is created per take inside RecordingBar and torn down with it —
+    // see AudioRecorder for why a shared, always-open microphone is not an option.
+    var recording by remember { mutableStateOf(false) }
+
+    // The conversation-level layers Escape must peel off before it closes the channel:
+    // recording, then the reaction sheet, then the mention autocomplete. Registered with the
+    // back dispatcher because an ancestor's preview handler sees Escape first — the sheet is
+    // inline (not a popup window), so without this the key never reaches it and the whole
+    // conversation closes instead.
+    BackHandler(enabled = recording) {
+        recording = false
+        true
+    }
+    BackHandler(
+        enabled = (pickerTarget != null && pickerTarget != "composer") || candidates.isNotEmpty(),
+    ) {
+            when {
+                pickerTarget != null && pickerTarget != "composer" -> {
+                    pickerTarget = null
+                    true
+                }
+                candidates.isNotEmpty() -> {
+                    dismissedAt = token?.start
+                    true
+                }
+                else -> false
+            }
+        }
+
         Box {
             // A real Popup, not an offset Box.
             //
@@ -1088,6 +1164,10 @@ private fun Conversation(
                         onPick = { emoji ->
                             draft += emoji
                             state.onTyping()
+                            // The popup holds focus while it's open; hand it back so the next
+                            // keystroke after a pick lands in the message box rather than
+                            // going nowhere.
+                            runCatching { composerFocus.requestFocus() }
                         },
                         onClose = { pickerTarget = null },
                         // Never wider than the window it floats over, or a narrow window
@@ -1101,6 +1181,9 @@ private fun Conversation(
 
             Column {
                 if (pickerTarget != null && pickerTarget != "composer") {
+                    // Not a Popup: the sheet sits inline above the composer and must not steal
+                    // the composer's focus, which is also why Escape reaches it through the
+                    // back dispatcher (registered above) rather than a key handler here.
                     ReactionSheet(
                         recents = recents,
                         onPick = { emoji ->
@@ -1110,13 +1193,32 @@ private fun Conversation(
                             pickerTarget = null
                         },
                         onDismiss = { pickerTarget = null },
+                        modifier = Modifier.animateEntrance(),
                     )
                 }
 
-                Row(
-                    Modifier.fillMaxWidth().padding(12.dp),
-                    verticalAlignment = Alignment.Bottom,
-                ) {
+                if (recording) {
+                    // Replaces the composer entirely: while you're recording, the text box has
+                    // nothing to do, and showing both invites half-finished messages.
+                    val active = remember { app.singular.client.platform.AudioRecorder() }
+                    DisposableEffect(Unit) { onDispose { active.cancel() } }
+                    RecordingBar(
+                        recorder = active,
+                        onCancel = { recording = false },
+                        onSend = { audio ->
+                            recording = false
+                            state.recordAndSend(audio)
+                        },
+                        onError = { message ->
+                            recording = false
+                            state.reportError(message)
+                        },
+                    )
+                } else {
+                    Row(
+                        Modifier.fillMaxWidth().padding(12.dp),
+                        verticalAlignment = Alignment.Bottom,
+                    ) {
                     Column(Modifier.weight(1f)) {
                         OutlinedTextField(
                             value = draft,
@@ -1186,7 +1288,10 @@ private fun Conversation(
                                 shape = RoundedCornerShape(12.dp),
                                 tonalElevation = 4.dp,
                                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                modifier = Modifier.padding(top = 4.dp).fillMaxWidth(),
+                                modifier = Modifier
+                                    .padding(top = 4.dp)
+                                    .fillMaxWidth()
+                                    .animateEntrance(),
                             ) {
                                 Column {
                                     candidates.forEachIndexed { index, candidate ->
@@ -1243,9 +1348,9 @@ private fun Conversation(
                     }
 
                     Spacer(Modifier.width(4.dp))
-                    // Emoji, then attach, then send. All three act on the message being
-                    // written, so they belong on the same side of the field — the emoji button
-                    // alone on the left split one group of controls across two places.
+                    // Emoji, then attach, then record, then send. All four act on the message
+                    // being written, so they belong on the same side of the field — the emoji
+                    // button alone on the left split one group of controls across two places.
                     IconButton(
                         onClick = {
                             pickerTarget = if (pickerTarget == "composer") null else "composer"
@@ -1259,11 +1364,21 @@ private fun Conversation(
                     ) {
                         Icon(Icons.Filled.AttachFile, contentDescription = "Attach a file")
                     }
+                    // Feature 6's second half. Record swaps the composer out rather than
+                    // opening a dialog — a voice note is a message being written, exactly like
+                    // the text it replaces.
+                    IconButton(
+                        onClick = { recording = true },
+                        enabled = state.uploadProgress == null,
+                    ) {
+                        Icon(Icons.Filled.Mic, contentDescription = "Record a voice note")
+                    }
                     IconButton(
                         onClick = { if (draft.isNotBlank()) { state.send(draft); draft = "" } },
                         enabled = draft.isNotBlank(),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                    }
                     }
                 }
             }
@@ -1281,6 +1396,7 @@ private fun ReactionSheet(
     recents: androidx.compose.runtime.MutableState<List<String>>,
     onPick: (String) -> Unit,
     onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -1289,7 +1405,7 @@ private fun ReactionSheet(
             recents = recents,
             onPick = onPick,
             onClose = onDismiss,
-            modifier = Modifier
+            modifier = modifier
                 .padding(horizontal = 12.dp, vertical = 4.dp)
                 .fillMaxWidth(),
         )
@@ -1300,7 +1416,7 @@ private fun ReactionSheet(
         shape = RoundedCornerShape(16.dp),
         tonalElevation = 4.dp,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp).fillMaxWidth(),
+        modifier = modifier.padding(horizontal = 12.dp, vertical = 4.dp).fillMaxWidth(),
     ) {
         Row(
             Modifier.padding(10.dp),

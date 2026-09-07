@@ -283,6 +283,7 @@ data class GraphQlResponse<T>(
 @Serializable data class MessagesData(val messages: MessagePageDto)
 @Serializable data class SendMessageData(@SerialName("sendMessage") val message: MessageDto)
 @Serializable data class OpenDmData(@SerialName("openDirectMessage") val channel: ChannelDto)
+@Serializable data class CreateGroupDmData(@SerialName("createGroupDm") val channel: ChannelDto)
 @Serializable data class UserByHandleData(val userByHandle: UserDto? = null)
 @Serializable data class MessageCreatedData(@SerialName("messageCreated") val message: MessageDto)
 @Serializable data class NotificationsData(@SerialName("notifications") val message: MessageDto)
@@ -443,6 +444,50 @@ data class InviteDto(
 @Serializable data class GuildsData(val guilds: List<GuildDto>)
 @Serializable data class GuildData(val guild: GuildDto? = null)
 @Serializable data class CreateGuildData(@SerialName("createGuild") val guild: GuildDto)
+
+/**
+ * Feature 18. One folder in the rail.
+ *
+ * The client owns this shape end to end — the server stores it as JSONB and never interprets
+ * it — so the DTO is the schema as far as this codebase is concerned.
+ */
+@Serializable
+data class GuildFolderDto(
+    val id: String,
+    val name: String? = null,
+    val color: Int? = null,
+    val guildIds: List<String> = emptyList(),
+)
+
+@Serializable
+data class FolderLayoutDto(
+    val folders: List<GuildFolderDto> = emptyList(),
+    val loose: List<String> = emptyList(),
+)
+
+@Serializable
+data class FoldersData(val folders: FolderLayoutDto = FolderLayoutDto())
+
+@Serializable
+data class SaveFoldersData(@SerialName("saveFolders") val save: FolderLayoutDto = FolderLayoutDto())
+
+/**
+ * One row of the server rail, in draw order.
+ *
+ * Folders and loose servers share a list so the rail can draw them from one pass and the
+ * keyboard shortcuts can index the result — one definition of the arrangement, not two.
+ */
+sealed interface RailRow {
+    /** A folder header. [members] are its servers, drawn beneath it unless [collapsed]. */
+    data class Folder(
+        val folder: GuildFolderDto,
+        val members: List<GuildDto>,
+        val collapsed: Boolean,
+    ) : RailRow
+
+    /** A single server tile, inside a folder or loose. */
+    data class Guild(val guild: GuildDto, val folderId: String?) : RailRow
+}
 @Serializable data class UpdateGuildData(@SerialName("updateGuild") val guild: GuildDto)
 @Serializable data class InvitesData(val invites: List<InviteDto>)
 @Serializable data class RedeemInviteData(@SerialName("redeemInvite") val guild: GuildDto)

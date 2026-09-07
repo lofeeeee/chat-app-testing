@@ -150,6 +150,16 @@ class SingularClient(
         return response.status.isSuccess()
     }
 
+    /**
+     * Downloads bytes from object storage — the audio behind a voice note.
+     *
+     * Same reasoning as [putBytes]: the presigned URL is its own credential, so no bearer token
+     * travels with it. Coil already fetches images this way through its Ktor fetcher; audio
+     * needs the bytes rather than a decoded bitmap, so it gets its own call.
+     */
+    suspend fun fetchBytes(url: String): ByteArray =
+        http.get(url).body<ByteArray>()
+
     fun close() = http.close()
 
     companion object {

@@ -19,7 +19,63 @@ data class SingularProperties(
     val valkey: Valkey = Valkey(),
     val storage: Storage = Storage(),
     val media: Media = Media(),
+    val push: Push = Push(),
 ) {
+    /**
+     * Provider credentials for real push delivery.
+     *
+     * Every field defaults to empty, and an empty credential set means that provider's
+     * transport is simply not registered — the app runs exactly as before, with the logging
+     * transport covering the final hop. Pasting real keys in (via env vars) is what turns
+     * delivery on; there is no code change and no feature flag.
+     */
+    data class Push(
+        val fcm: Fcm = Fcm(),
+        val apns: Apns = Apns(),
+        val webpush: WebPush = WebPush(),
+        /** How many due notifications one worker pass may dispatch. */
+        val batchSize: Int = 100,
+        /** Give-up point for retrying one notification. */
+        val maxAttempts: Int = 8,
+    ) {
+        /**
+         * FCM HTTP v1. A service-account JSON (the file Firebase consoles hand you) plus the
+         * project id it belongs to.
+         */
+        data class Fcm(
+            val serviceAccountJson: String = "",
+            val projectId: String = "",
+        ) {
+            val configured: Boolean get() = serviceAccountJson.isNotBlank() && projectId.isNotBlank()
+        }
+
+        /**
+         * APNs token-based auth: the .p8 key contents (not a path — the container should not
+         * need a volume just to read one file), its key id, the team id, and the topic
+         * (bundle id) every notification is addressed to.
+         */
+        data class Apns(
+            val p8Key: String = "",
+            val keyId: String = "",
+            val teamId: String = "",
+            val topic: String = "",
+            val sandbox: Boolean = true,
+        ) {
+            val configured: Boolean get() =
+                p8Key.isNotBlank() && keyId.isNotBlank() && teamId.isNotBlank() && topic.isNotBlank()
+        }
+
+        /** Web Push (VAPID). The keys are the standard base64url-encoded pair. */
+        data class WebPush(
+            val vapidPublicKey: String = "",
+            val vapidPrivateKey: String = "",
+            val subject: String = "mailto:admin@example.com",
+        ) {
+            val configured: Boolean get() =
+                vapidPublicKey.isNotBlank() && vapidPrivateKey.isNotBlank()
+        }
+    }
+
     data class Storage(
         val endpoint: String = "http://localhost:9100",
         val region: String = "us-east-1",

@@ -179,6 +179,10 @@ fun Modifier.formField(
  * is only guaranteed for real OS windows — a dialog drawn in a popup inside our own window is
  * ours to handle. [onConfirm] is optional: a dialog holding a multi-line field must not treat
  * Enter as "OK", or it becomes impossible to type a second line.
+ *
+ * The content gets a one-shot entrance animation ([animateEntrance]): every dialog in the app
+ * routes through here, so this one spot is the entire "dialogs should feel placed, not
+ * stamped" requirement.
  */
 @Composable
 fun DialogKeys(
@@ -206,8 +210,9 @@ fun DialogKeys(
                     else -> false
                 }
             },
-        content = content,
-    )
+    ) {
+        Box(Modifier.animateEntrance(), content = content)
+    }
 }
 
 /**

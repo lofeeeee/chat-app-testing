@@ -37,6 +37,7 @@ class MessageService(
     private val guilds: app.singular.guild.GuildRepository,
     private val guildService: app.singular.guild.GuildService,
     private val media: app.singular.media.MediaService,
+    private val pushFanout: app.singular.push.PushFanout,
     private val snowflake: Snowflake,
     private val props: SingularProperties,
 ) {
@@ -120,8 +121,10 @@ class MessageService(
 
         // Publish only after the transaction commits. Emitting inline would let a subscriber
         // receive a message that a subsequent rollback erases — a ghost in the client's
-        // timeline that only a refresh clears.
+        // timeline that only a refresh clears. Push fanout rides the same rule, and the
+        // parsed mentions travel with it so the fanout never re-parses the body.
         afterCommit { events.publish(message) }
+        pushFanout.onMessageSent(message, parsed)
 
         return message
     }
@@ -174,6 +177,9 @@ class MessageService(
             locationExpiresAt = expiresAt,
         )
         afterCommit { events.publish(message) }
+        // A shared location notifies like a message — the preview says "Shared a location"
+        // rather than quoting two coordinates.
+        pushFanout.onMessageSent(message, emptyList())
         return message
     }
 

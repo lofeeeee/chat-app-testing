@@ -3,6 +3,7 @@ package app.singular.client.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -30,7 +32,9 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FormatAlignCenter
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -100,6 +104,48 @@ fun StoryEditor(state: AppState, onClose: () -> Unit) {
         StoryMode.PHOTO -> image != null
     }
 
+    // Escape (and the Android system back) reach this editor through the back dispatcher. With
+    // nothing on the canvas it just closes; with content it asks first, because the draft has
+    // no autosave and an accidental Escape would throw the work away.
+    var confirmDiscard by remember { mutableStateOf(false) }
+    BackHandler {
+        if (postable) {
+            confirmDiscard = true
+            true
+        } else {
+            onClose()
+            true
+        }
+    }
+
+    if (confirmDiscard) {
+        AlertDialog(
+            onDismissRequest = { confirmDiscard = false },
+            title = { Text("Discard this story?") },
+            text = {
+                DialogKeys(onDismiss = { confirmDiscard = false }) {
+                    Text(
+                        "Nothing has been posted yet. Everything on the canvas — photo, " +
+                            "words, stickers — will be lost.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { confirmDiscard = false; onClose() },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) { Text("Discard") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDiscard = false }) { Text("Keep editing") }
+            },
+        )
+    }
+
     fun overlays(): List<StoryOverlay> = buildList {
         addAll(elements.filter { !it.value.isNullOrBlank() })
         if (mode == StoryMode.PHOTO && caption.isNotBlank()) {
@@ -117,11 +163,17 @@ fun StoryEditor(state: AppState, onClose: () -> Unit) {
         true
     }
 
+    // One definition of "leave the editor": the back arrow, Escape and the Android system
+    // back all ask the same question. Posting bypasses it — the work is not being lost.
+    fun requestClose() {
+        if (postable) confirmDiscard = true else onClose()
+    }
+
     Column(Modifier.fillMaxSize()) {
         EditorHeader(
             busy = state.uploadProgress != null,
             postable = postable,
-            onClose = onClose,
+            onClose = ::requestClose,
             onPost = {
                 state.postStory(
                     overlaysJson = encodeOverlays(overlays()),
@@ -151,6 +203,14 @@ fun StoryEditor(state: AppState, onClose: () -> Unit) {
                 background = background,
                 image = image,
                 overlays = overlays(),
+                // Gestures are wired to the live element list, so a drag, pinch or rotate lands
+                // in the preview immediately and in the inspector on the next recomposition —
+                // both read the same `elements` state list, so they cannot disagree.
+                selectedIndex = selected,
+                onSelect = { selected = it },
+                onChange = { index, updated ->
+                    if (index in elements.indices) elements[index] = updated
+                },
             )
         }
 
@@ -397,6 +457,9 @@ private fun StoryPreview(
     background: StoryBackground,
     image: PickedFile?,
     overlays: List<StoryOverlay>,
+    selectedIndex: Int = -1,
+    onSelect: (Int) -> Unit = {},
+    onChange: (Int, StoryOverlay) -> Unit = { _, _ -> },
 ) {
     Box(
         Modifier
@@ -406,6 +469,14 @@ private fun StoryPreview(
             .background(
                 if (mode == StoryMode.TEXT) background.brush
                 else androidx.compose.ui.graphics.SolidColor(Color(0xFF101010))
+            )
+            // Tapping the empty part of the frame deselects — the only way to get from "an
+            // element is selected" back to "nothing is", which the inspector needs so its
+            // sliders stop applying to something you're no longer looking at.
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = { onSelect(-1) },
             ),
     ) {
         if (mode == StoryMode.PHOTO) {
@@ -435,7 +506,16 @@ private fun StoryPreview(
             }
         }
 
-        StoryOverlayCanvas(overlays = overlays, modifier = Modifier.fillMaxSize())
+        // Editable here, read-only in the viewer: same compositor, one flag. The overlay list
+        // passed in is the live one, so a gesture updates state rather than a copy.
+        StoryOverlayCanvas(
+            overlays = overlays,
+            modifier = Modifier.fillMaxSize(),
+            editable = true,
+            selectedIndex = selectedIndex,
+            onSelect = onSelect,
+            onChange = onChange,
+        )
     }
 }
 

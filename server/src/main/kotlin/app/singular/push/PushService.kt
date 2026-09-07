@@ -5,7 +5,6 @@ import app.singular.social.SocialRepository
 import org.slf4j.LoggerFactory
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
-import org.springframework.stereotype.Service
 import java.util.UUID
 
 enum class PushPlatform(val code: Short) {
@@ -99,8 +98,10 @@ interface PushTransport {
  * Google; only the final hop isn't. Logging instead of sending keeps the whole path exercised,
  * so wiring the real transports later is a matter of adding two classes rather than
  * discovering the surrounding logic was never run.
+ *
+ * No longer `@Service` — [PushTransportConfig] decides between this and the real transports
+ * based on credentials, and registering both would leave an ambiguous transport list.
  */
-@Service
 class LoggingPushTransport : PushTransport {
     override val platform = PushPlatform.FCM
     override fun send(token: String, message: PushMessage): Boolean {

@@ -99,6 +99,28 @@ singular:
     thumbnail-max-edge: 320
     story-ttl: PT24H
 
+  # Real push delivery. Every credential defaults to empty, and an empty set means that
+  # provider's transport is not registered — the app runs on the logging stand-in exactly as
+  # before. Pasting real keys in here is what turns delivery on; no code change, no flag.
+  push:
+    fcm:
+      # Full service-account JSON from the Firebase console (one line, or \n escapes).
+      service-account-json: ${FCM_SERVICE_ACCOUNT_JSON:}
+      project-id: ${FCM_PROJECT_ID:}
+    apns:
+      # Contents of the .p8 key (not a path), plus its ids and the target topic (bundle id).
+      p8-key: ${APNS_P8_KEY:}
+      key-id: ${APNS_KEY_ID:}
+      team-id: ${APNS_TEAM_ID:}
+      topic: ${APNS_TOPIC:}
+      sandbox: ${APNS_SANDBOX:true}
+    webpush:
+      vapid-public-key: ${VAPID_PUBLIC_KEY:}
+      vapid-private-key: ${VAPID_PRIVATE_KEY:}
+      subject: ${VAPID_SUBJECT:mailto:admin@example.com}
+    batch-size: 100
+    max-attempts: 8
+
 logging:
   level:
     app.singular: ${LOG_LEVEL:DEBUG}

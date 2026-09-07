@@ -1,6 +1,9 @@
-package app.singular.client.ui
+﻿package app.singular.client.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -30,6 +33,8 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -60,7 +65,7 @@ data class StoryOverlay(
     val color: String? = null,
     /** `sans`, `serif`, `mono` or `cursive`. Resolved by [storyFontFamily]. */
     val font: String? = null,
-    /** Type size in sp. Absolute, not a multiplier — see [StoryText]. */
+    /** Type size in sp. Absolute, not a multiplier â€” see [StoryText]. */
     val size: Float? = null,
     /** `start`, `center` or `end`. */
     val align: String? = null,
@@ -72,7 +77,7 @@ data class StoryOverlay(
 /**
  * Parses the overlay list the server round-trips as opaque JSON.
  *
- * The server deliberately never interprets this — it stores and returns it — so the client owns
+ * The server deliberately never interprets this â€” it stores and returns it â€” so the client owns
  * the shape and adding a new overlay type costs no migration and no server deploy.
  *
  * Anything malformed is skipped rather than failing the whole story: one bad sticker written by
@@ -132,17 +137,32 @@ private fun escape(raw: String): String =
  * Draws overlays on top of a story's media.
  *
  * Composited at view time, never baked into the uploaded image. That is what lets a story be
- * restyled, re-localised or corrected without re-uploading a byte — and it is why mentions
+ * restyled, re-localised or corrected without re-uploading a byte â€” and it is why mentions
  * inside a story re-render with someone's *current* name rather than freezing the one they had
  * when it was posted.
  *
  * [BoxWithConstraints] supplies the frame size that turns fractional coordinates into pixels.
  */
 @Composable
-fun StoryOverlayCanvas(overlays: List<StoryOverlay>, modifier: Modifier = Modifier) {
+fun StoryOverlayCanvas(
+    overlays: List<StoryOverlay>,
+    modifier: Modifier = Modifier,
+    editable: Boolean = false,
+    selectedIndex: Int = -1,
+    onSelect: (Int) -> Unit = {},
+    onChange: (Int, StoryOverlay) -> Unit = { _, _ -> },
+) {
     BoxWithConstraints(modifier) {
         val frameWidth = maxWidth
         val frameHeight = maxHeight
+
+        // Gesture deltas arrive in pixels; overlay coordinates are fractions of the frame. The
+        // conversion needs a density, and this is the one scope that has both the constraints
+        // and a composable context â€” so it happens once here, rather than being re-derived (or
+        // worse, guessed from Dp.value) inside every gesture.
+        val density = LocalDensity.current
+        val frameWidthPx = with(density) { frameWidth.toPx() }.coerceAtLeast(1f)
+        val frameHeightPx = with(density) { frameHeight.toPx() }.coerceAtLeast(1f)
 
         // Two positioning models, because text and objects want different things.
         //
@@ -155,33 +175,73 @@ fun StoryOverlayCanvas(overlays: List<StoryOverlay>, modifier: Modifier = Modifi
         //
         // **Objects sit at points.** A sticker someone dragged somewhere has a position, not
         // an alignment, so those keep the fractional offset.
-        overlays.forEach { overlay ->
+        overlays.forEachIndexed { index, overlay ->
+            val selected = editable && index == selectedIndex
+
             when (overlay.type) {
                 "caption" -> CaptionOverlay(overlay)
 
-                "text" -> Box(
-                    Modifier
-                        .offset(y = frameHeight * overlay.y.coerceIn(0f, 1f))
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp)
-                        .rotate(overlay.rotation),
-                    contentAlignment = when (overlay.align) {
-                        "start" -> Alignment.CenterStart
-                        "end" -> Alignment.CenterEnd
-                        else -> Alignment.Center
+                "text" -> TextBand(
+                    overlay = overlay,
+                    frameHeight = frameHeight,
+                    editable = editable,
+                    selected = selected,
+                    onTap = { if (editable) onSelect(index) },
+                    // Text drags vertically only. Its `x` is an alignment, not a coordinate â€”
+                    // letting a drag write both would put the two controls in a position the
+                    // inspector can no longer describe.
+                    onDragY = { delta ->
+                        if (editable) {
+                            onChange(
+                                index,
+                                overlay.copy(
+                                    y = (overlay.y + delta / frameHeightPx).coerceIn(0.02f, 0.92f),
+                                ),
+                            )
+                        }
                     },
-                ) { TextOverlay(overlay) }
+                    onTransform = { zoom, rotation ->
+                        if (editable) {
+                            onChange(
+                                index,
+                                overlay.copy(
+                                    scale = (overlay.scale * zoom).coerceIn(0.3f, 4f),
+                                    rotation = overlay.rotation + rotation,
+                                ),
+                            )
+                        }
+                    },
+                )
 
-                else -> Box(
-                    Modifier
-                        .offset(
-                            x = frameWidth * overlay.x.coerceIn(0f, 1f),
-                            y = frameHeight * overlay.y.coerceIn(0f, 1f),
-                        )
-                        // Rotate before scaling so a tilted sticker grows along its own axis
-                        // rather than shearing.
-                        .rotate(overlay.rotation)
-                        .scale(overlay.scale.coerceIn(0.3f, 4f)),
+                else -> ObjectAtPoint(
+                    overlay = overlay,
+                    frameWidth = frameWidth,
+                    frameHeight = frameHeight,
+                    editable = editable,
+                    selected = selected,
+                    onTap = { if (editable) onSelect(index) },
+                    onDrag = { dx, dy ->
+                        if (editable) {
+                            onChange(
+                                index,
+                                overlay.copy(
+                                    x = (overlay.x + dx / frameWidthPx).coerceIn(0f, 1f),
+                                    y = (overlay.y + dy / frameHeightPx).coerceIn(0f, 1f),
+                                ),
+                            )
+                        }
+                    },
+                    onTransform = { zoom, rotation ->
+                        if (editable) {
+                            onChange(
+                                index,
+                                overlay.copy(
+                                    scale = (overlay.scale * zoom).coerceIn(0.3f, 4f),
+                                    rotation = overlay.rotation + rotation,
+                                ),
+                            )
+                        }
+                    },
                 ) {
                     when (overlay.type) {
                         "sticker", "emoji" -> StickerOverlay(overlay)
@@ -200,12 +260,131 @@ fun StoryOverlayCanvas(overlays: List<StoryOverlay>, modifier: Modifier = Modifi
 }
 
 /**
+ * A text element: the band, plus the drag/rotate/zoom handles when editing.
+ *
+ * Transform gestures are combined into one `detectTransformGestures` rather than separate
+ * drag and scale detectors, because people pinch *while* dragging â€” two independent detectors
+ * would make the element jump between the two each time a second finger landed.
+ */
+@Composable
+private fun TextBand(
+    overlay: StoryOverlay,
+    frameHeight: androidx.compose.ui.unit.Dp,
+    editable: Boolean,
+    selected: Boolean,
+    onTap: () -> Unit,
+    onDragY: (deltaPx: Float) -> Unit,
+    onTransform: (zoom: Float, rotation: Float) -> Unit,
+) {
+    Box(
+        Modifier
+            .offset(y = frameHeight * overlay.y.coerceIn(0f, 1f))
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .then(if (editable) Modifier.gestureLayer(onTap, onDragY, onTransform) else Modifier)
+            .rotate(overlay.rotation)
+            .scale(overlay.scale.coerceIn(0.3f, 4f)),
+        contentAlignment = when (overlay.align) {
+            "start" -> Alignment.CenterStart
+            "end" -> Alignment.CenterEnd
+            else -> Alignment.Center
+        },
+    ) {
+        TextOverlay(overlay)
+        if (selected) SelectionRing()
+    }
+}
+
+/** A sticker, mention, location pin or music widget: placed at a point, fully transformable. */
+@Composable
+private fun ObjectAtPoint(
+    overlay: StoryOverlay,
+    frameWidth: androidx.compose.ui.unit.Dp,
+    frameHeight: androidx.compose.ui.unit.Dp,
+    editable: Boolean,
+    selected: Boolean,
+    onTap: () -> Unit,
+    onDrag: (dxPx: Float, dyPx: Float) -> Unit,
+    onTransform: (zoom: Float, rotation: Float) -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        Modifier
+            .offset(
+                x = frameWidth * overlay.x.coerceIn(0f, 1f),
+                y = frameHeight * overlay.y.coerceIn(0f, 1f),
+            )
+            .then(
+                if (editable) {
+                    Modifier.gestureLayer(
+                        onTap = onTap,
+                        onDrag = onDrag,
+                        onTransform = onTransform,
+                    )
+                } else Modifier
+            )
+            // Rotate before scaling so a tilted sticker grows along its own axis rather than
+            // shearing.
+            .rotate(overlay.rotation)
+            .scale(overlay.scale.coerceIn(0.3f, 4f)),
+    ) {
+        content()
+        if (selected) SelectionRing()
+    }
+}
+
+/**
+ * Tap to select, drag to move, pinch to scale, twist to rotate â€” on one element.
+ *
+ * [onDragY] vs [onDrag]: text uses the one-axis variant because its horizontal position is an
+ * alignment, so both are offered and callers pick the one that matches their model.
+ */
+private fun Modifier.gestureLayer(
+    onTap: () -> Unit,
+    onDrag: ((dxPx: Float, dyPx: Float) -> Unit)? = null,
+    onDragY: ((deltaPx: Float) -> Unit)? = null,
+    onTransform: (zoom: Float, rotation: Float) -> Unit,
+): Modifier = this
+    .pointerInput(Unit) {
+        detectTapGestures(onTap = { onTap() })
+    }
+    .pointerInput(Unit) {
+        detectTransformGestures(
+            // Pan is handled here, not in a separate drag detector: a two-finger pinch that
+            // also moves must not fight a drag for the same pointer stream.
+            panZoomLock = false,
+        ) { centroid, pan, zoom, rotation ->
+            if (zoom != 1f || rotation != 0f) onTransform(zoom, rotation)
+            if (pan != androidx.compose.ui.geometry.Offset.Zero) {
+                onDrag?.invoke(pan.x, pan.y) ?: onDragY?.invoke(pan.y)
+            }
+        }
+    }
+
+/** The dashed box that says which element the inspector is editing. */
+@Composable
+private fun BoxScope.SelectionRing() {
+    Box(
+        Modifier
+            .matchParentSize()
+            .padding(4.dp)
+            .border(
+                width = 1.5.dp,
+                color = Color.White.copy(alpha = 0.9f),
+                shape = RoundedCornerShape(6.dp),
+            )
+    )
+}
+
+}
+
+/**
  * The font families a story can use.
  *
  * Only the four families every platform already has. Shipping a font file would be the obvious
  * alternative and it is the wrong one here: the project vendors everything offline, and a
  * bundled face costs megabytes in the jar for a choice most people make once. Unknown names
- * fall back to sans rather than throwing — same forward-compatibility contract as everything
+ * fall back to sans rather than throwing â€” same forward-compatibility contract as everything
  * else that crosses the wire as a string.
  */
 fun storyFontFamily(name: String?): FontFamily = when (name) {
@@ -227,12 +406,12 @@ val StoryFonts: List<Pair<String, String>> = listOf(
  * The caption, WhatsApp-style: centred, low in the frame, on a barely-there dark scrim.
  *
  * Deliberately the one overlay type that ignores `x`/`y`. A caption is not a sticker someone
- * placed — it is the frame's own furniture, and it has to sit in the same spot on a portrait
+ * placed â€” it is the frame's own furniture, and it has to sit in the same spot on a portrait
  * phone photo and a wide desktop screenshot. Positioning it fractionally like the others is
  * what pushed it off-centre and into the middle of the picture at different aspect ratios.
  *
  * The scrim is near-transparent rather than a solid plate: enough to hold white text over a
- * bright photo, not enough to hide what is behind it — which is the whole balance a caption
+ * bright photo, not enough to hide what is behind it â€” which is the whole balance a caption
  * has to strike. It also spans the full width so the band reads as a deliberate edge rather
  * than a box floating in the middle of the image.
  */
@@ -283,7 +462,7 @@ private fun TextOverlay(overlay: StoryOverlay) {
     when (overlay.style) {
         // A filled plate behind the words, so light text stays readable over a bright photo.
         // The plate takes the chosen colour and the text flips to whichever of black or white
-        // survives on it — picking the fill and the ink separately is how you get white on
+        // survives on it â€” picking the fill and the ink separately is how you get white on
         // yellow.
         "plate" -> StoryText(
             overlay = overlay,
@@ -358,7 +537,7 @@ private fun StickerOverlay(overlay: StoryOverlay) {
 /**
  * The music widget (feature 20).
  *
- * Deliberately metadata only — title, artist, and a link out. Streaming a clip of a commercial
+ * Deliberately metadata only â€” title, artist, and a link out. Streaming a clip of a commercial
  * track is what needs the label licensing that Instagram has and this app does not; showing
  * what someone is listening to and deep-linking into their own music app needs none of it.
  */

@@ -225,6 +225,13 @@ private fun AppearanceSection(state: AppState) {
             checked = state.themeDark ?: true,
             onCheckedChange = { state.setThemeDark(it) },
         )
+
+        SettingToggle(
+            title = "Reduce motion",
+            description = "Skip screen transitions and entrance animations on this device.",
+            checked = state.reduceMotion,
+            onCheckedChange = { state.reduceMotion = it },
+        )
     }
 }
 

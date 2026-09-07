@@ -171,6 +171,9 @@ type Mutation {
 
   "Get-or-create. Calling it twice for the same pair returns the same channel."
   openDirectMessage(userId: Snowflake!): Channel!
+
+  "Feature 2: a group DM. You are the owner; everyone listed joins immediately."
+  createGroupDm(userIds: [Snowflake!]!, name: String): Channel!
   sendMessage(input: SendMessageInput!): Message!
   markRead(channelId: Snowflake!, messageId: Snowflake!): Boolean!
   """

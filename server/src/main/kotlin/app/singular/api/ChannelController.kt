@@ -36,6 +36,13 @@ class ChannelController(
         channelService.openDirectMessage(ctx.requirePrincipal().userId, userId)
 
     @MutationMapping
+    fun createGroupDm(
+        @Argument userIds: List<Long>,
+        @Argument name: String?,
+        ctx: GraphQLContext,
+    ): Channel = channelService.createGroupDm(ctx.requirePrincipal().userId, userIds, name)
+
+    @MutationMapping
     fun markRead(
         @Argument channelId: Long,
         @Argument messageId: Long,

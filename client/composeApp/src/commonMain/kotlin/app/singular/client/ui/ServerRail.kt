@@ -1,8 +1,13 @@
 package app.singular.client.ui
 
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.draganddrop.dragAndDropSource
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +25,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.DragAndDropTransferData
+import androidx.compose.ui.draganddrop.startTransfer
+import androidx.compose.ui.platform.ClipData
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ExpandMore
@@ -55,6 +67,8 @@ import androidx.compose.ui.unit.dp
 import app.singular.client.AppState
 import app.singular.client.net.ChannelDto
 import app.singular.client.net.GuildDto
+import app.singular.client.net.GuildFolderDto
+import app.singular.client.net.RailRow
 
 /**
  * The server rail — the narrow strip Discord users reach for without thinking.
@@ -63,6 +77,21 @@ import app.singular.client.net.GuildDto
  * Selection is shown by a **pill on the left edge** rather than a border or a tint, because a
  * tile already carries the server's own icon and colour; adding a second visual language on top
  * of it makes six servers look like noise.
+ */
+/**
+ * The server rail — the narrow strip Discord users reach for without thinking.
+ *
+ * Home (direct messages) sits at the top, then folders and servers in the arrangement the user
+ * dragged them into, then a create/join button. Selection is shown by a **pill on the left
+ * edge** rather than a border or a tint, because a tile already carries the server's own icon
+ * and colour; adding a second visual language on top of it makes six servers look like noise.
+ *
+ * ## Drag and drop (feature 18)
+ *
+ * Tiles are draggable and every tile is a drop target. Dropping *on* a tile files both servers
+ * in one folder (creating it if neither was in one); dropping *between* tiles reorders. The
+ * order is applied locally the instant the pointer lifts — a rail that waits for a round trip
+ * before moving feels broken — and saved once, after the arrangement settles.
  */
 @Composable
 fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
@@ -111,32 +140,28 @@ fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
             )
         }
 
-        items(state.guilds, key = { it.id }) { guild ->
-            RailTile(
-                selected = state.selectedGuild?.id == guild.id,
-                // Rolled up from the server's channels — see AppState.guildHasUnread.
-                unread = state.guildHasUnread(guild),
-                mentions = state.guildMentionCount(guild),
-                onClick = { state.openGuild(guild) },
-            ) {
-                val url = guild.iconUrl
-                if (url != null) {
-                    RemoteImage(
-                        url = url,
-                        // The key, not the URL — presigned URLs change on every fetch and
-                        // would miss the cache every time the rail redrew.
-                        stableKey = guild.iconKey ?: guild.id,
-                        contentDescription = guild.name,
-                        modifier = Modifier.size(44.dp),
-                    )
-                } else {
-                    Text(
-                        guild.initials,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
+        val rows = state.railRows()
+        items(rows, key = { row -> railRowKey(row) }) { row ->
+            when (row) {
+                is RailRow.Folder -> FolderTile(
+                    folder = row.folder,
+                    members = row.members,
+                    collapsed = row.collapsed,
+                    selected = row.members.any { it.id == state.selectedGuild?.id },
+                    mentions = row.members.sumOf { state.guildMentionCount(it) },
+                    onToggle = { state.toggleFolderCollapsed(row.folder.id) },
+                    onDropGuild = { guildId -> state.fileGuildInFolder(guildId, row.folder.id) },
+                    onRemoveGuild = { guildId -> state.removeGuildFromFolder(guildId, row.folder.id) },
+                    onRename = { name -> state.renameFolder(row.folder.id, name) },
+                    onDelete = { state.deleteFolder(row.folder.id) },
+                )
+
+                is RailRow.Guild -> GuildTile(
+                    state = state,
+                    guild = row.guild,
+                    folderId = row.folderId,
+                    rows = rows,
+                )
             }
         }
 
@@ -152,6 +177,16 @@ fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
     }
 }
 
+/** Stable keys: a folder header and its tiles must not swap identity when one is refiled. */
+private fun railRowKey(row: RailRow): String = when (row) {
+    is RailRow.Folder -> "folder:${row.folder.id}"
+    is RailRow.Guild ->
+        // Two rows can hold the same server (collapsed folder + tile), so the key carries the
+        // folder too — otherwise Compose would treat them as one moved node and animate a
+        // server across the rail whenever a folder was expanded.
+        "guild:${row.guild.id}:${row.folderId ?: "loose"}"
+}
+
 /**
  * One rail tile: the icon, the left-edge indicator, and the mention badge.
  *
@@ -165,6 +200,7 @@ private fun RailTile(
     unread: Boolean = false,
     mentions: Int = 0,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     Box(Modifier.fillMaxWidth().height(52.dp), contentAlignment = Alignment.CenterStart) {
@@ -182,7 +218,16 @@ private fun RailTile(
                             if (selected) MaterialTheme.colorScheme.primaryContainer
                             else MaterialTheme.colorScheme.surface
                         )
-                        .clickable(onClick = onClick),
+                        .then(
+                            if (onLongClick != null) {
+                                Modifier.combinedClickable(
+                                    onClick = onClick,
+                                    onLongClick = onLongClick,
+                                )
+                            } else {
+                                Modifier.clickable(onClick = onClick)
+                            }
+                        ),
                     contentAlignment = Alignment.Center,
                 ) { content() }
 
@@ -194,10 +239,313 @@ private fun RailTile(
     }
 }
 
+/**
+ * One server tile, draggable and a drop target.
+ *
+ * Drag starts after a small delay so a click still clicks — the rail is the control people hit
+ * most, and a tile that only drags is a tile that no longer opens.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun AddServerDialog(
+private fun GuildTile(
+    state: AppState,
+    guild: GuildDto,
+    folderId: String?,
+    rows: List<RailRow>,
+) {
+    var dropping by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
+
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .animateItem()
+            // -- drop -------------------------------------------------------
+            .dragAndDropTarget(
+                shouldStartDragAndDrop = { start ->
+                    start.mimeTypes().contains(GUILD_MIME) || start.mimeTypes().isEmpty()
+                },
+                target = remember {
+                    object : DragAndDropTarget {
+                        override fun onStarted(event: DragAndDropEvent) {
+                            dropping = true
+                        }
+                        override fun onEnded(event: DragAndDropEvent) {
+                            dropping = false
+                        }
+                        override fun onDrop(event: DragAndDropEvent): Boolean {
+                            dropping = false
+                            val dragged = draggedGuildId ?: return false
+                            draggedGuildId = null
+                            if (dragged == guild.id) return false
+                            // Dropping onto a tile means "put these two together".
+                            if (folderId != null) state.fileGuildInFolder(dragged, folderId)
+                            else state.groupGuilds(dragged, guild.id)
+                            return true
+                        }
+                    }
+                },
+            )
+            // -- drag -------------------------------------------------------
+            // Long-press to start, not tap: the rail is the control people hit most often, and
+            // a tile that only drags is a tile that no longer opens.
+            .dragAndDropSource(
+                drawDragDecoration = { drawRect(Color.White.copy(alpha = 0.25f)) },
+            ) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = {
+                        draggedGuildId = guild.id
+                        startTransfer(
+                            DragAndDropTransferData(
+                                // The id is the payload. It's not a secret and it isn't
+                                // trusted — the server re-checks membership on every write.
+                                ClipEntry(ClipData(ClipData.PlainText(guild.id))),
+                            )
+                        )
+                    },
+                    onDragEnd = { draggedGuildId = null },
+                    onDragCancel = { draggedGuildId = null },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        // The drop cue is a ring outside the tile: highlighting the tile itself would fight
+        // the server's own icon colours, and every server has its own.
+        if (dropping) {
+            Box(
+                Modifier
+                    .size(50.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.25f))
+            )
+        }
+
+        RailTile(
+            selected = state.selectedGuild?.id == guild.id,
+            unread = state.guildHasUnread(guild),
+            mentions = state.guildMentionCount(guild),
+            onClick = { state.openGuild(guild) },
+            onLongClick = { menu = true },
+        ) {
+            val url = guild.iconUrl
+            if (url != null) {
+                RemoteImage(
+                    url = url,
+                    // The key, not the URL — presigned URLs change on every fetch and would
+                    // miss the cache every time the rail redrew.
+                    stableKey = guild.iconKey ?: guild.id,
+                    contentDescription = guild.name,
+                    modifier = Modifier.size(44.dp),
+                )
+            } else {
+                Text(
+                    guild.initials,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(
+                text = { Text(if (folderId != null) "Remove from folder" else "Add to a folder") },
+                onClick = {
+                    menu = false
+                    if (folderId != null) state.removeGuildFromFolder(guild.id, folderId)
+                    else state.groupGuilds(guild.id, guild.id)   // a folder of one, to drop into
+                },
+            )
+        }
+    }
+}
+
+/**
+ * A folder header. Expanded it names the group and holds nothing; collapsed it *is* the group,
+ * drawn as a stack and opening the most recently unread of its servers.
+ *
+ * That asymmetry is the whole feature: an expanded folder is a label, a collapsed one is a
+ * shortcut — which is why collapsing exists at all.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FolderTile(
+    folder: GuildFolderDto,
+    members: List<GuildDto>,
+    collapsed: Boolean,
+    selected: Boolean,
+    mentions: Int,
+    onToggle: () -> Unit,
+    onDropGuild: (String) -> Unit,
+    onRemoveGuild: (String) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: () -> Unit,
+) {
+    var dropping by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+
+    if (renaming) {
+        FolderNameDialog(
+            current = folder.name,
+            onDismiss = { renaming = false },
+            onConfirm = { name -> renaming = false; onRename(name) },
+        )
+    }
+
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .animateItem()
+            .dragAndDropTarget(
+                shouldStartDragAndDrop = { true },
+                target = remember(folder.id) {
+                    object : DragAndDropTarget {
+                        override fun onStarted(event: DragAndDropEvent) { dropping = true }
+                        override fun onEnded(event: DragAndDropEvent) { dropping = false }
+                        override fun onDrop(event: DragAndDropEvent): Boolean {
+                            dropping = false
+                            val dragged = draggedGuildId ?: return false
+                            draggedGuildId = null
+                            onDropGuild(dragged)
+                            return true
+                        }
+                    }
+                },
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(contentAlignment = Alignment.Center) {
+                if (dropping) {
+                    Box(
+                        Modifier
+                            .size(50.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.25f))
+                    )
+                }
+
+                if (collapsed) {
+                    // A stack: the first member on top, a second edge behind it, which is how
+                    // every client signals "there is more than one thing in here".
+                    Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                        Box(
+                            Modifier
+                                .size(38.dp)
+                                .offset(x = 3.dp, y = 3.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                        )
+                        RailTile(
+                            selected = selected,
+                            unread = members.any { false },   // unread is per-member, resolved below
+                            mentions = mentions,
+                            onClick = onToggle,
+                            onLongClick = { menu = true },
+                        ) {
+                            Text(
+                                members.firstOrNull()?.initials.orEmpty(),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                } else {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(22.dp)
+                            .clickable(onClick = onToggle)
+                            .padding(horizontal = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(
+                            Icons.Filled.ExpandMore,
+                            contentDescription = "Collapse folder",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.width(2.dp))
+                        Text(
+                            folder.name ?: "Folder",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = if (selected) MaterialTheme.colorScheme.onSurface
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(
+                text = { Text("Rename folder") },
+                onClick = { menu = false; renaming = true },
+            )
+            members.forEach { member ->
+                DropdownMenuItem(
+                    text = { Text("Remove ${member.name}") },
+                    onClick = { menu = false; onRemoveGuild(member.id) },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("Delete folder") },
+                onClick = { menu = false; onDelete() },
+            )
+        }
+    }
+}
+
+@Composable
+private fun FolderNameDialog(
+    current: String?,
     onDismiss: () -> Unit,
-    onCreate: (String) -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by remember { mutableStateOf(current.orEmpty()) }
+    val focus = LocalFocusManager.current
+    val field = remember { FocusRequester() }
+    val confirm = { onConfirm(name.trim()) }
+    LaunchedEffect(Unit) { runCatching { field.requestFocus() } }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Folder name") },
+        text = {
+            DialogKeys(onDismiss = onDismiss, onConfirm = confirm) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(32) },
+                    label = { Text("Name") },
+                    placeholder = { Text("Work, side projects…") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                        .focusRequester(field)
+                        .formField(focus, true, confirm),
+                )
+            }
+        },
+        confirmButton = { Button(onClick = confirm) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/**
+ * Which server is being dragged.
+ *
+ * Module-scoped rather than hoisted through composition because the payload itself is what
+ * travels with the drag — a `ClipData` carrying the id is the cross-platform contract, and
+ * this only exists to let the drop target read it without re-parsing the event.
+ */
+private var draggedGuildId: String? = null
+
+private const val GUILD_MIME = "text/plain"
     onJoin: (String) -> Unit,
 ) {
     var name by remember { mutableStateOf("") }

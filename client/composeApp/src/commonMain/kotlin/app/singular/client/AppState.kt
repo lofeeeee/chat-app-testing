@@ -64,6 +64,12 @@ import app.singular.client.net.FinalizeUploadData
 import app.singular.client.net.SendLocationData
 import app.singular.client.net.CreateGuildChannelData
 import app.singular.client.net.CreateGuildData
+import app.singular.client.net.CreateGroupDmData
+import app.singular.client.net.FolderLayoutDto
+import app.singular.client.net.FoldersData
+import app.singular.client.net.GuildFolderDto
+import app.singular.client.net.RailRow
+import app.singular.client.net.SaveFoldersData
 import app.singular.client.net.GuildDto
 import app.singular.client.net.GuildOperations
 import app.singular.client.net.GuildsData
@@ -72,6 +78,7 @@ import app.singular.client.net.SingularClient
 import app.singular.client.net.StoryDto
 import app.singular.client.net.StoryFeedData
 import app.singular.client.platform.PickedFile
+import app.singular.client.platform.RecordedAudio
 import app.singular.client.platform.pickFile
 import app.singular.client.net.UnblockData
 import app.singular.client.net.UnmuteChannelData
@@ -122,6 +129,16 @@ class AppState(
     val messages: SnapshotStateList<MessageDto> = mutableStateListOf()
     var selectedChannel by mutableStateOf<ChannelDto?>(null)
         private set
+
+    /**
+     * Surfaces a message the UI produced rather than the network.
+     *
+     * The one door into [error], so a platform failure (a denied microphone) reads exactly like
+     * a failed request instead of needing its own display path in every screen that can see it.
+     */
+    fun reportError(message: String) {
+        error = message
+    }
 
     var busy by mutableStateOf(false)
         private set
@@ -254,6 +271,23 @@ class AppState(
     private var notifyEnabledState by mutableStateOf(readLocalString(NOTIFY_ENABLED) != "false")
     private var notifyMentionsOnlyState by mutableStateOf(readLocalString(NOTIFY_MENTIONS_ONLY) == "true")
     private var notifyPreviewsState by mutableStateOf(readLocalString(NOTIFY_PREVIEWS) != "false")
+
+    /**
+     * When on, screen transitions and entrance animations are skipped.
+     *
+     * Grouped with the notification prefs on purpose: like them, this is a property of the
+     * person at this machine, not of the account — syncing it would move a vestibular-
+     * sensitivity setting to devices where it doesn't apply.
+     */
+    private var reduceMotionState by mutableStateOf(readLocalString(REDUCE_MOTION) == "true")
+
+    /** Skip transitions and entrance animations. */
+    var reduceMotion: Boolean
+        get() = reduceMotionState
+        set(value) {
+            reduceMotionState = value
+            writeLocalString(REDUCE_MOTION, value.toString())
+        }
 
     /** Master switch. Off means the app never raises a system notification. */
     var notifyEnabled: Boolean
@@ -424,6 +458,9 @@ class AppState(
         startHeartbeat()
         runCatching { loadStories() }
         runCatching { loadGuilds() }
+        // After the servers: the arrangement refers to them by id, and a folder whose members
+        // haven't loaded yet would render as an empty group.
+        runCatching { loadFolders() }
         // Last: it subscribes to whatever channels and servers the two loads above found.
         watchNotifications()
     }
@@ -809,6 +846,27 @@ class AppState(
     }
 
     /**
+     * Feature 2's missing half: create a group DM and land in it.
+     *
+     * Mirrors [openDmWithHandle] deliberately — new channel, same reload/resubscribe/open
+     // sequence — because a group DM differs from a DM in *who* is in it, not in what
+     * happens next.
+     */
+    fun createGroupDm(userIds: List<String>, name: String?) = run {
+        val channel = client.execute<CreateGroupDmData>(
+            Operations.CREATE_GROUP_DM,
+            buildJsonObject {
+                put("userIds", buildJsonArray { userIds.forEach { add(it) } })
+                name?.let { put("name", it) }
+            },
+        ).channel
+
+        loadChannels()
+        watchNotifications()
+        openChannelNow(channel)
+    }
+
+    /**
      * Leaves the conversation without leaving the app — what Escape does.
      *
      * Tears the subscriptions down rather than leaving them running behind an empty pane: a
@@ -1145,6 +1203,69 @@ class AppState(
         }
     }
 
+    /**
+     * Sends a voice note: the second half of feature 6.
+     *
+     * The upload shape already carried `voiceNote`, `durationMs` and `waveform` — this is the
+     * first caller that supplies all three. Duration and peaks are what let the receiver draw a
+     * waveform without downloading and decoding the audio, which is the whole reason the
+     * columns exist rather than being derived server-side.
+     */
+    fun recordAndSend(audio: RecordedAudio) {
+        val channel = selectedChannel ?: return
+
+        scope.launch {
+            try {
+                uploadProgress = 0f
+                val filename = "voice.${if (audio.mimeType == "audio/mp4") "m4a" else "wav"}"
+
+                val slot = client.execute<CreateUploadData>(
+                    Operations.CREATE_UPLOAD,
+                    buildJsonObject {
+                        put("filename", filename)
+                        put("contentType", audio.mimeType)
+                        put("sizeBytes", audio.bytes.size.toString())
+                        put("voiceNote", true)
+                    },
+                ).slot
+
+                uploadProgress = 0.15f
+                if (!client.putBytes(slot.uploadUrl, audio.bytes, audio.mimeType)) {
+                    error = "Upload failed. Check the storage service is running."
+                    return@launch
+                }
+
+                uploadProgress = 0.75f
+                val ready = client.execute<FinalizeUploadData>(
+                    Operations.FINALIZE_UPLOAD,
+                    buildJsonObject {
+                        put("attachmentId", slot.attachment.id)
+                        put("durationMs", audio.durationMs)
+                        put("waveform", buildJsonArray { audio.peaks.forEach { add(it) } })
+                    },
+                ).attachment
+
+                val sent = client.execute<SendMessageData>(
+                    Operations.SEND_MESSAGE,
+                    buildJsonObject {
+                        put("input", buildJsonObject {
+                            put("channelId", channel.id)
+                            put("content", "")
+                            put("nonce", newNonce())
+                            put("attachmentIds", buildJsonArray { add(ready.id) })
+                        })
+                    },
+                ).message
+
+                appendIfNew(sent)
+            } catch (e: Exception) {
+                error = describe(e)
+            } finally {
+                uploadProgress = null
+            }
+        }
+    }
+
     /** Shares a fixed point. Live location needs a platform location provider; not wired yet. */
     fun sendLocation(latitude: Double, longitude: Double, label: String?) = run {
         val channel = selectedChannel ?: return@run
@@ -1280,6 +1401,213 @@ class AppState(
         // Keep the open server pointing at the freshly loaded copy, or drop it if we were
         // removed. Holding a stale DTO would show channels we can no longer read.
         selectedGuild = selectedGuild?.let { current -> loaded.firstOrNull { it.id == current.id } }
+    }
+
+    // -- Feature 18: server folders -------------------------------------------
+
+    /**
+     * The rail's arrangement: folders plus the loose servers in drag order.
+     *
+     * Per-user, stored as one JSONB row, and — critically — *not* the order [guilds] is in.
+     * [guilds] is the server's membership order and is replaced on every reload; this is the
+     * arrangement the user chose and is the rail's source of truth for what to draw.
+     */
+    var folderLayout by mutableStateOf(FolderLayoutDto())
+        private set
+
+    /** Collapsed folders. Session-only: which groups you folded is a glance-level preference. */
+    private val collapsedFolders = mutableSetOf<String>()
+
+    suspend fun loadFolders() {
+        folderLayout = runCatching { client.execute<FoldersData>(GuildOperations.FOLDERS).folders }
+            .getOrDefault(FolderLayoutDto())
+    }
+
+    /**
+     * The rail's rows, in draw order: a header and (when expanded) its tiles for each folder,
+     * then the unfiled servers.
+     *
+     * Servers inside a collapsed folder are drawn as a single stack tile, which is the entire
+     * point of folding one — the rail keeps its height instead of growing with every group.
+     */
+    fun railRows(): List<RailRow> = buildList {
+        val byId = guilds.associateBy { it.id }
+
+        folderLayout.folders.forEach { folder ->
+            val members = folder.guildIds.mapNotNull { byId[it] }
+            if (members.isEmpty()) return@forEach    // a folder whose servers are all gone
+            val collapsed = folder.id in collapsedFolders
+            add(RailRow.Folder(folder, members, collapsed))
+            if (!collapsed) members.forEach { add(RailRow.Guild(it, folderId = folder.id)) }
+        }
+
+        // Loose servers last. Anything filed nowhere — including servers you joined since the
+        // arrangement was last saved — appears here rather than vanishing from the rail.
+        val filed = folderLayout.folders.flatMap { it.guildIds }.toSet()
+        val loose = folderLayout.loose.mapNotNull { byId[it] }.filter { it.id !in filed } +
+            guilds.filter { it.id !in folderLayout.loose && it.id !in filed }
+        loose.forEach { add(RailRow.Guild(it, folderId = null)) }
+    }
+
+    /**
+     * Flat draw order of every server, for the Ctrl+digit and Alt+arrow shortcuts.
+     *
+     * Collapsed folders count as their first server — that's the tile you'd tap — so the
+     * shortcuts stay in step with the strip even when several servers are folded away.
+     */
+    fun railGuildOrder(): List<GuildDto> = buildList {
+        railRows().forEach { row ->
+            when (row) {
+                is RailRow.Folder -> {
+                    if (row.collapsed) addAll(row.members.take(1)) else addAll(row.members)
+                }
+                is RailRow.Guild -> add(row.guild)
+            }
+        }
+    }.distinctBy { it.id }
+
+    fun toggleFolderCollapsed(folderId: String) {
+        if (!collapsedFolders.remove(folderId)) collapsedFolders.add(folderId)
+    }
+
+    /**
+     * Applies an arrangement the rail computed and persists it.
+     *
+     * Debounced by the caller — the rail settles the order locally so the drag feels instant,
+     * then saves once rather than writing JSONB on every pointer move.
+     */
+    fun saveFolders(folders: List<GuildFolderDto>, loose: List<String>) = run {
+        val saved = client.execute<SaveFoldersData>(
+            GuildOperations.SAVE_FOLDERS,
+            buildJsonObject {
+                put("folders", buildJsonArray {
+                    folders.forEach { folder ->
+                        add(buildJsonObject {
+                            put("id", folder.id)
+                            folder.name?.let { put("name", it) }
+                            folder.color?.let { put("color", it) }
+                            put("guildIds", buildJsonArray { folder.guildIds.forEach { add(it) } })
+                        })
+                    }
+                })
+                put("loose", buildJsonArray { loose.forEach { add(it) } })
+            },
+        ).save
+        folderLayout = saved
+    }
+
+    /** Creates a folder containing exactly one server, and puts it where it was. */
+    fun createFolderFor(guildId: String, folderId: String = newFolderId()): List<GuildFolderDto> =
+        folderLayout.folders + GuildFolderDto(
+            id = folderId,
+            name = null,
+            color = null,
+            guildIds = listOf(guildId),
+        )
+
+    private fun newFolderId(): String = "f${System.currentTimeMillis().toString(36)}"
+
+    /**
+     * Files a server into an existing folder, then reorders: the folder moves to where the
+     * server was dropped, because that is where the user's attention was.
+     */
+    fun fileGuildInFolder(guildId: String, folderId: String) {
+        val folders = folderLayout.folders.toMutableList()
+        val index = folders.indexOfFirst { it.id == folderId }
+        if (index < 0) return
+        val target = folders[index]
+        if (guildId in target.guildIds) return
+
+        folders[index] = target.copy(guildIds = target.guildIds + guildId)
+        // Out of wherever it was first: a server in two folders would render twice.
+        val loose = folderLayout.loose.filter { it != guildId }
+        val others = folders.map {
+            if (it.id == folderId) it else it.copy(guildIds = it.guildIds.filter { id -> id != guildId })
+        }
+        saveFolderArrangement(others, loose)
+    }
+
+    /**
+     * Puts two servers in one folder. Dropping A on B means "these belong together" — the
+     * folder is created when neither has one, and extended when one already does.
+     */
+    fun groupGuilds(draggedId: String, targetId: String) {
+        // A drop on itself with nothing else in play: make a folder of one. That's the
+        // "start a new group here" gesture, and it gives the user something to drop into.
+        if (draggedId == targetId) {
+            saveFolderArrangement(
+                createFolderFor(draggedId),
+                folderLayout.loose.filter { it != draggedId },
+            )
+            return
+        }
+
+        val folders = folderLayout.folders.toMutableList()
+        val existing = folders.indexOfFirst { draggedId in it.guildIds || targetId in it.guildIds }
+
+        if (existing >= 0) {
+            // One of them is already filed: the other joins it.
+            val folder = folders[existing]
+            val merged = folder.guildIds + listOf(draggedId, targetId).filter { it !in folder.guildIds }
+            folders[existing] = folder.copy(guildIds = merged)
+            saveFolderArrangement(
+                folders,
+                folderLayout.loose.filter { it != draggedId && it != targetId },
+            )
+        } else {
+            // Neither is filed: a new folder holding both. Its servers drop out of the loose
+            // list, which is the only place an unfiled server is drawn from.
+            saveFolderArrangement(
+                createFolderFor(draggedId).map {
+                    if (it.guildIds == listOf(draggedId)) it.copy(guildIds = listOf(draggedId, targetId))
+                    else it
+                },
+                folderLayout.loose.filter { it != draggedId && it != targetId },
+            )
+        }
+    }
+
+    fun removeGuildFromFolder(guildId: String, folderId: String) {
+        val folders = folderLayout.folders.map { folder ->
+            if (folder.id == folderId) folder.copy(guildIds = folder.guildIds.filter { it != guildId })
+            else folder
+        }.filter { it.guildIds.isNotEmpty() }
+        // Back to the loose list, at the end — nowhere else in particular to put it.
+        saveFolderArrangement(folders, folderLayout.loose + guildId)
+    }
+
+    fun renameFolder(folderId: String, name: String) {
+        val folders = folderLayout.folders.map {
+            if (it.id == folderId) it.copy(name = name.trim().ifEmpty { null }) else it
+        }
+        saveFolderArrangement(folders, folderLayout.loose)
+    }
+
+    /**
+     * Deletes the folder and keeps its servers — deleting a view should never feel like it
+     * might have deleted anything real, so they return to the loose list in their folder order.
+     */
+    fun deleteFolder(folderId: String) {
+        val folder = folderLayout.folders.firstOrNull { it.id == folderId } ?: return
+        val folders = folderLayout.folders.filter { it.id != folderId }
+        saveFolderArrangement(folders, folderLayout.loose + folder.guildIds)
+    }
+
+    /**
+     * Writes an arrangement through, locally first.
+     *
+     * Local-first is the whole feel of the feature: the rail has already moved by the time the
+     * pointer lifted, and this only reconciles with the server's answer. A failure leaves the
+     * optimistic order in place and surfaces the error — worse than a refetch would be a rail
+     * that snaps back under someone's finger.
+     */
+    private fun saveFolderArrangement(folders: List<GuildFolderDto>, loose: List<String>) {
+        val dedupedLoose = loose.distinct()
+        folderLayout = FolderLayoutDto(folders = folders.filter { it.guildIds.isNotEmpty() }, loose = dedupedLoose)
+        scope.launch {
+            runCatching { saveFolders(folders, dedupedLoose) }
+                .onFailure { error = describe(it as Exception) }
+        }
     }
 
     /**
@@ -1593,23 +1921,61 @@ class AppState(
     }
 
     /** Steps through the rail. Index -1 is home (direct messages), so it is part of the walk. */
+    /**
+     * Alt+arrow between servers. Walks the **rail's** order, not the membership list: with
+     * folders, those differ, and a shortcut that disagrees with what's on screen is broken.
+     */
     fun stepGuild(delta: Int) {
-        val current = guilds.indexOfFirst { it.id == selectedGuild?.id }
-        val next = (current + delta).coerceIn(-1, guilds.lastIndex)
-        openGuildAt(next)
+        val order = railGuildOrder()
+        val current = order.indexOfFirst { it.id == selectedGuild?.id }
+        // -1 is "direct messages", the row above the first server — matching Ctrl+0.
+        val next = (current + delta).coerceIn(-1, order.lastIndex)
+        if (next < 0) openGuild(null) else openGuild(order[next])
     }
 
-    /** Ctrl+1..9 and Ctrl+0. Out-of-range indexes do nothing rather than jumping to an end. */
+    /**
+     * Ctrl+1..9 and Ctrl+0. Out-of-range indexes do nothing rather than jumping to an end.
+     *
+     * Numbering follows the rail — a collapsed folder counts as the server you'd land on —
+     * because the numbers a user memorises are the ones the strip teaches them.
+     */
     fun openGuildAt(index: Int) {
+        val order = railGuildOrder()
         when {
             index < 0 -> openGuild(null)
-            index <= guilds.lastIndex -> openGuild(guilds[index])
+            index <= order.lastIndex -> openGuild(order[index])
             // Ctrl+7 in a four-server list is a mistake, not a request for the last one.
             else -> Unit
         }
     }
 
     // -- Notifications -------------------------------------------------------
+
+    /**
+     * Reports this device's push token to the server — feature 7's registration half.
+     *
+     * Nothing calls this yet. The server side (registration, the mute/DND filter, the outbox and
+     * the transports) is built and provider-agnostic; the only thing missing is a device token,
+     * and the only way to get an Android one is Firebase, which this project doesn't vendor.
+     * [platform] is a parameter rather than a constant for exactly that reason — Web Push gets
+     * its subscription from the browser with no SDK at all, so this is the seam where whichever
+     * provider comes first plugs in.
+     */
+    fun registerPushToken(platform: String, token: String) {
+        if (token.isBlank()) return
+        scope.launch {
+            runCatching {
+                client.postRaw(
+                    Operations.REGISTER_PUSH_TOKEN,
+                    buildJsonObject {
+                        put("platform", platform)
+                        put("token", token)
+                        put("deviceId", deviceId())
+                    },
+                )
+            }
+        }
+    }
 
     /**
      * One socket carrying messages from every channel, so conversations you don't have open
@@ -1814,6 +2180,7 @@ class AppState(
         const val NOTIFY_ENABLED = "notify_enabled"
         const val NOTIFY_MENTIONS_ONLY = "notify_mentions_only"
         const val NOTIFY_PREVIEWS = "notify_previews"
+        const val REDUCE_MOTION = "reduce_motion"
 
         const val NONCE_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 

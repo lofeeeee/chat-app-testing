@@ -162,6 +162,30 @@ of Ktor plus kotlinx.serialization, and no build step that reaches over the netw
 
 Worth revisiting once the schema outgrows one file.
 
+### Navigation is a route stack, and "back" is one chain
+
+Screens are a [Route](../../composeApp/src/commonMain/kotlin/app/singular/client/ui/Nav.kt) in a
+small back stack with Chat as the floor; only the top is drawn, and `AnimatedContent` transitions
+between them. Escape and the Android system back both walk the **same** chain, in this order:
+
+```
+1. Overlay interceptors — the innermost thing open (reaction sheet, mention autocomplete,
+   the story editor's discard guard)
+2. The shortcuts sheet
+3. One level of the route stack
+4. The open conversation (ChatScreen closes the channel)
+```
+
+Interceptors exist because of how preview key events flow: **an ancestor's `onPreviewKeyEvent`
+sees a key before any descendant.** A nested overlay can therefore never preempt the shell's own
+Escape branch — a reaction sheet with its own key handler would never fire, because the shell
+closes the conversation first. So overlays *register* ([BackHandler](../../composeApp/src/commonMain/kotlin/app/singular/client/ui/Back.kt))
+instead of intercepting, and the shell asks the stack before it does anything else.
+
+Rule for handlers: **they may change their own state, never navigate.** The story editor's guard
+opens a confirm dialog and returns; navigating from inside a handler would re-enter the
+dispatcher on the way out.
+
 ### `expect fun`, not `expect object`
 
 `expect object` is still a Beta Kotlin feature and warns on every build. Top-level expect

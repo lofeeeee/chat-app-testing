@@ -39,6 +39,11 @@ dependencies {
     // Reads and rewrites image metadata; used to strip EXIF GPS before anything is served.
     implementation("com.drewnoakes:metadata-extractor:2.19.0")
 
+    // Web Push (RFC 8030/8291/8292): VAPID signing and aes128gcm payload encryption. The one
+    // push provider library vendored — the crypto derivation is exactly what hand-rolling
+    // gets subtly wrong, and FCM/APNs above are plain HTTP + JWT done by hand instead.
+    implementation("nl.martijndwars:web-push:5.1.1")
+
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")

@@ -20,10 +20,18 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -150,14 +158,49 @@ private fun FileAttachment(attachment: AttachmentDto, tint: Color) {
 }
 
 /**
- * A voice note drawn from precomputed peaks.
+ * A voice note drawn from precomputed peaks, playable in place.
  *
- * The waveform comes down with the message as 0â€“100 integers, so the bar renders instantly
- * without downloading and decoding the audio â€” which is the difference between a list that
+ * The waveform comes down with the message as 0–100 integers, so the bar renders instantly
+ * without downloading and decoding the audio — which is the difference between a list that
  * scrolls and one that stalls on every voice message.
+ *
+ * Playback fetches the bytes once and hands them to the platform [AudioPlayer]. One player is
+ * shared by every note in the list: two voice notes playing over each other is never what
+ * anyone meant, and a per-message player would make that easy to trigger by accident.
  */
 @Composable
 private fun VoiceNote(attachment: AttachmentDto, tint: Color) {
+    var playing by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(false) }
+    var progress by remember { mutableStateOf(0f) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            // Only if this note is the one holding the player — otherwise leaving the screen
+            // would stop someone else's note mid-sentence.
+            if (VoiceNotePlayer.isPlaying(attachment.id)) VoiceNotePlayer.stop()
+        }
+    }
+
+    val toggle = {
+        if (playing) {
+            VoiceNotePlayer.stop()
+        } else {
+            loading = true
+            VoiceNotePlayer.play(
+                attachment = attachment,
+                onProgress = { seconds, duration ->
+                    progress = if (duration > 0) (seconds / duration).coerceIn(0f, 1f) else 0f
+                },
+                onStateChange = { isPlaying ->
+                    playing = isPlaying
+                    loading = false
+                    if (!isPlaying) progress = 0f
+                },
+            )
+        }
+    }
+
     Row(
         Modifier
             .fillMaxWidth()
@@ -166,8 +209,18 @@ private fun VoiceNote(attachment: AttachmentDto, tint: Color) {
             .padding(horizontal = 12.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.PlayArrow, contentDescription = "Play", tint = tint, modifier = Modifier.size(22.dp))
-        Spacer(Modifier.width(10.dp))
+        IconButton(onClick = toggle, modifier = Modifier.size(30.dp), enabled = !loading) {
+            when {
+                loading -> CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = tint,
+                )
+                playing -> Icon(Icons.Filled.Stop, contentDescription = "Stop", tint = tint)
+                else -> Icon(Icons.Filled.PlayArrow, contentDescription = "Play", tint = tint)
+            }
+        }
+        Spacer(Modifier.width(6.dp))
 
         Canvas(Modifier.weight(1f).height(26.dp)) {
             // A flat line when there are no peaks: an empty gap would read as a broken message,
@@ -176,17 +229,30 @@ private fun VoiceNote(attachment: AttachmentDto, tint: Color) {
             val barWidth = size.width / (peaks.size * 1.7f)
             val gap = barWidth * 0.7f
             val centre = size.height / 2f
+            val played = (peaks.size * progress).toInt()
 
             peaks.forEachIndexed { index, peak ->
                 val amplitude = (peak.coerceIn(0, 100) / 100f) * centre
                 val x = index * (barWidth + gap)
                 drawLine(
-                    color = tint.copy(alpha = 0.85f),
+                    // Played portion in full colour, the rest dimmed — the only progress
+                    // indicator a 26dp waveform has room for.
+                    color = if (index <= played) tint else tint.copy(alpha = 0.35f),
                     start = Offset(x, centre - amplitude.coerceAtLeast(1.5f)),
                     end = Offset(x, centre + amplitude.coerceAtLeast(1.5f)),
                     strokeWidth = barWidth,
                 )
             }
+        }
+
+        Spacer(Modifier.width(10.dp))
+        Text(
+            formatDuration(attachment.durationMs),
+            style = MaterialTheme.typography.labelSmall,
+            color = tint.copy(alpha = 0.75f),
+        )
+    }
+}
         }
 
         Spacer(Modifier.width(10.dp))

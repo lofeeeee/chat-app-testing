@@ -81,10 +81,16 @@ fun ImageCropperDialog(
 
     if (bitmap == null) {
         // An undecodable file is not worth a crop editor; say so and let them pick again.
+        // DialogKeys is here for the same reason as the main editor: Escape should close this
+        // too, and on desktop that only happens if we handle it ourselves.
         AlertDialog(
             onDismissRequest = onCancel,
             title = { Text("Can't read that image") },
-            text = { Text("Singular couldn't open ${file.name}. Try a PNG or JPEG.") },
+            text = {
+                DialogKeys(onDismiss = onCancel) {
+                    Text("Singular couldn't open ${file.name}. Try a PNG or JPEG.")
+                }
+            },
             confirmButton = { TextButton(onClick = onCancel) { Text("Close") } },
         )
         return

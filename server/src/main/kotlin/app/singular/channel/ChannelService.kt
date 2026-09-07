@@ -8,6 +8,7 @@ import app.singular.core.Snowflake
 import app.singular.domain.AuditAction
 import app.singular.domain.Channel
 import app.singular.domain.ChannelType
+import app.singular.social.SocialRepository
 import app.singular.user.UserRepository
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -17,9 +18,19 @@ class ChannelService(
     private val channels: ChannelRepository,
     private val users: UserRepository,
     private val guildService: app.singular.guild.GuildService,
+    private val social: SocialRepository,
     private val snowflake: Snowflake,
     private val audit: AuditLog,
 ) {
+
+    private companion object {
+        /**
+         * Ceiling on group DM size. Discord's is nine others and ten years of usage says it's
+         * the right shape: bigger than that is a server with worse tools, and the fanout and
+         * the "everyone can see everyone" UI both stop being fun well before this anyway.
+         */
+        const val MAX_GROUP_DM_OTHERS = 9
+    }
 
     fun listForUser(userId: Long): List<Channel> = channels.listForUser(userId)
 
@@ -78,6 +89,54 @@ class ChannelService(
         audit.record(selfId, AuditAction.CHANNEL_CREATE, targetId = channelId)
 
         return channels.findById(channelId) ?: error("Channel $channelId vanished after insert")
+    }
+
+    /**
+     * Feature 2's missing half: create a group DM.
+     *
+     * The schema has carried `type = GROUP_DM`, `owner_id` and the member list since the
+     * baseline migration — only the path in was missing. The owner is recorded because group
+     * DMs are the one kind of conversation with someone who can vouch for its shape: inviting
+     * more people later is an owner-only action, which is the difference between "a group
+     * chat" and "a way to put anyone in a room with anyone else".
+     */
+    @Transactional
+    fun createGroupDm(selfId: Long, memberIds: List<Long>, name: String?): Channel {
+        val others = memberIds.distinct()
+        if (others.isEmpty()) throw InvalidInput("Pick at least one person.")
+        if (others.size > MAX_GROUP_DM_OTHERS) {
+            throw InvalidInput("Group conversations are limited to $MAX_GROUP_DM_OTHERS others.")
+        }
+        if (selfId in others) throw InvalidInput("You're already in the group — pick others.")
+
+        others.forEach { id ->
+            users.findById(id) ?: throw NotFound("User")
+            // A block in either direction means the group would put two people in a
+            // conversation one of them paid to avoid — the same rule DM sending enforces.
+            if (social.blockExistsEitherWay(selfId, id)) {
+                throw Forbidden("that conversation")
+            }
+        }
+
+        val cleanName = name?.trim()?.takeIf { it.isNotEmpty() }
+            ?: defaultGroupName(selfId, others)
+
+        val channelId = snowflake.next()
+        channels.insertChannel(channelId, ChannelType.GROUP_DM, name = cleanName, ownerId = selfId)
+        channels.addMembers(channelId, others + selfId)
+        audit.record(selfId, AuditAction.CHANNEL_CREATE, targetId = channelId)
+
+        return channels.findById(channelId) ?: error("Channel $channelId vanished after insert")
+    }
+
+    /** "You, Alex and Sam" — a name the owner can rename later, not a wall of ids. */
+    private fun defaultGroupName(selfId: Long, others: List<Long>): String {
+        val names = others.mapNotNull { users.findById(it)?.username }
+        val everyone = (listOf(users.findById(selfId)?.username ?: "You") + names)
+        return when {
+            everyone.size <= 3 -> everyone.joinToString(", ")
+            else -> everyone.take(3).joinToString(", ") + " and ${everyone.size - 3} more"
+        }.take(64)
     }
 
     @Transactional
