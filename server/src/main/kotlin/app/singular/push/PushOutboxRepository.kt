@@ -15,7 +15,8 @@ data class PushOutboxRow(
     val body: String,
     val channelId: Long?,
     val messageId: Long?,
-    val attempts: Int,
+    /** Zero on enqueue — the dispatcher owns this from then on. */
+    val attempts: Int = 0,
 )
 
 /**

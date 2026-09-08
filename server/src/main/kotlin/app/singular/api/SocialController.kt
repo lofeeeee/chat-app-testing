@@ -40,7 +40,14 @@ data class SettingsInput(
  * The string forms are stored, never the ordinals: an ordinal silently reassigns everyone's
  * theme the moment someone inserts a preset in the middle of the list.
  */
-enum class ThemePreset { EMBER, COCOA, SAGE, DUSK, SLATE }
+enum class ThemePreset {
+    EMBER, COCOA, SAGE, DUSK, SLATE,
+    // Added with the second wave of palettes. The client shipped these before this enum knew
+    // them, which made them unselectable: GraphQL rejects an unknown enum value while coercing
+    // the variable, so the mutation failed with "No value found for name 'PAPER'" and never
+    // reached a resolver. Both lists and `schema.graphqls` have to move together.
+    MIDNIGHT, CARBON, WINE, PAPER, FROST,
+}
 
 @Controller
 class SocialController(

@@ -2,10 +2,6 @@ package app.singular.push
 
 import app.singular.config.SingularProperties
 import com.fasterxml.jackson.databind.ObjectMapper
-import org.bouncycastle.asn1.pkcs.PrivateKeyInfo
-import org.bouncycastle.openssl.PEMKeyPair
-import org.bouncycastle.openssl.PEMParser
-import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter
 import org.slf4j.LoggerFactory
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
@@ -14,7 +10,6 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
-import java.security.KeyPair
 import java.security.Signature
 import java.security.interfaces.RSAPrivateKey
 import java.time.Instant
@@ -51,7 +46,7 @@ class FcmTransport(
 
     private class CachedToken(val bearer: String, val expiresAt: Instant)
 
-    private class ServiceAccount(val email: String, val keyId: String, val keyPair: KeyPair)
+    private class ServiceAccount(val email: String, val keyId: String, val privateKey: RSAPrivateKey)
 
     override fun send(token: String, message: PushMessage): Boolean {
         val auth = bearerToken() ?: run {
@@ -122,8 +117,13 @@ class FcmTransport(
                 """"aud":"https://oauth2.googleapis.com/token",""" +
                 """"exp":${now + TOKEN_TTL_SECONDS},"iat":$now}"""
         )
-        val signer = Signature.getInstance("RS256")
-        signer.initSign(account.keyPair.private as RSAPrivateKey)
+        // "SHA256withRSA", not "RS256". `RS256` is the *JWS* name for this algorithm and goes
+        // in the header above; JCA has never known it, so `getInstance("RS256")` throws
+        // NoSuchAlgorithmException — at the first send, not at startup, which is the worst
+        // place to find out. The header and the signer name the same algorithm in two
+        // different vocabularies and both have to be right.
+        val signer = Signature.getInstance("SHA256withRSA")
+        signer.initSign(account.privateKey)
         signer.update("$header.$claims".toByteArray())
         val signature = b64url(signer.sign())
         val assertion = "$header.$claims.$signature"
@@ -162,15 +162,10 @@ class FcmTransport(
         val pem = tree.get("private_key")?.asText()
             ?: error("Service account JSON has no private_key")
 
-        PEMParser(pem.reader()).use { parser ->
-            val obj = parser.readObject() ?: error("Unparseable private key PEM")
-            val info = when (obj) {
-                is PEMKeyPair -> obj.privateKeyInfo
-                is PrivateKeyInfo -> obj
-                else -> error("Unexpected PEM object: ${obj::class.simpleName}")
-            }
-            return ServiceAccount(email, keyId, JcaPEMKeyConverter().getKeyPair(info))
-        }
+        // A service-account `private_key` is a PKCS#8 RSA key; the JDK reads it — see [PemKeys].
+        // Only the private half is ever used (JWT signing), so the KeyPair this used to build
+        // was carrying a public key nobody asked for.
+        return ServiceAccount(email, keyId, PemKeys.readPkcs8(pem, "RSA") as RSAPrivateKey)
     }
 
     private fun b64url(bytes: ByteArray): String =

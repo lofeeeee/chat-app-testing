@@ -1,5 +1,6 @@
 package app.singular.client.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -26,16 +27,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.decodeToImageBitmap
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Paint
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import app.singular.client.platform.PickedFile
 import app.singular.client.platform.cropSquare
@@ -99,7 +96,15 @@ fun ImageCropperDialog(
     val imageAspect = bitmap.width.toFloat() / bitmap.height.toFloat()
 
     AlertDialog(
-        onDismissRequest = onCancel,
+        // Deliberately inert: only Cancel, "Use this" and Escape close this dialog.
+        //
+        // A Material dialog dismisses itself when the scrim is clicked, which is right for a
+        // confirmation and wrong for a step someone is in the middle of — losing the crop means
+        // reopening the OS file picker and finding the file again. It also closed the cropper on
+        // its own the first time a picture was chosen: the native file dialog is a separate
+        // window, and the click that dismisses it can arrive at the window underneath, landing
+        // on the scrim of the cropper that just opened. Nothing incidental can close it now.
+        onDismissRequest = {},
         title = { Text(title) },
         text = {
             DialogKeys(onDismiss = onCancel) {
@@ -214,8 +219,16 @@ private fun clampCentre(value: Float, span: Float): Float {
  * the circle dimmed.
  *
  * The dimming is a full-viewport scrim with the circle punched out of it using `BlendMode.Clear`
- * — one draw rather than four rectangles round a hole, and it stays correct at any size. It
- * needs its own layer, which is why the canvas draws into a saved layer.
+ * — one draw rather than four rectangles round a hole, and it stays correct at any size.
+ *
+ * ## What the layer may contain
+ *
+ * `BlendMode.Clear` erases everything in the layer it is drawn into, so the layer must hold the
+ * scrim **and nothing else**. This previously opened the layer before drawing the image, which
+ * put the photo inside it — so punching the circle erased the picture along with the scrim, and
+ * the crop area came out as an opaque black disc with the image visible only around it: the
+ * exact inverse of the intent. The image is drawn first, on the canvas proper; the layer is
+ * opened afterwards and holds only the scrim it is there to perforate.
  */
 @Composable
 private fun CropCanvas(
@@ -225,58 +238,53 @@ private fun CropCanvas(
     centreY: Float,
     imageAspect: Float,
 ) {
-    androidx.compose.foundation.Image(
-        bitmap = bitmap,
-        contentDescription = "Crop preview",
-        contentScale = ContentScale.None,
-        modifier = Modifier
+    Canvas(
+        Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .drawWithContent {
-                val viewport = size.minDimension
-                // How large the whole image must be drawn for the chosen square to fill the
-                // viewport: the crop is 1/zoom of the short edge, so the short edge is
-                // viewport * zoom.
-                val shortEdge = viewport * zoom
-                val drawWidth = if (imageAspect >= 1f) shortEdge * imageAspect else shortEdge
-                val drawHeight = if (imageAspect >= 1f) shortEdge else shortEdge / imageAspect
+    ) {
+        val viewport = size.minDimension
+        // How large the whole image must be drawn for the chosen square to fill the viewport:
+        // the crop is 1/zoom of the short edge, so the short edge is viewport * zoom.
+        val shortEdge = viewport * zoom
+        val drawWidth = if (imageAspect >= 1f) shortEdge * imageAspect else shortEdge
+        val drawHeight = if (imageAspect >= 1f) shortEdge else shortEdge / imageAspect
 
-                // Place the image so the crop centre lands in the middle of the viewport.
-                val left = viewport / 2f - centreX * drawWidth
-                val top = viewport / 2f - centreY * drawHeight
+        // Place the image so the crop centre lands in the middle of the viewport.
+        val left = viewport / 2f - centreX * drawWidth
+        val top = viewport / 2f - centreY * drawHeight
 
-                drawIntoCanvas { canvas ->
-                    val paint = Paint()
-                    canvas.saveLayer(
-                        androidx.compose.ui.geometry.Rect(Offset.Zero, size),
-                        paint,
-                    )
-                    drawImage(
-                        image = bitmap,
-                        dstOffset = androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()),
-                        dstSize = androidx.compose.ui.unit.IntSize(
-                            drawWidth.toInt().coerceAtLeast(1),
-                            drawHeight.toInt().coerceAtLeast(1),
-                        ),
-                    )
-                    // Scrim everywhere, then clear the circle back out of it.
-                    drawRect(Color.Black.copy(alpha = 0.55f))
-                    drawCircle(
-                        color = Color.Black,
-                        radius = viewport / 2f,
-                        center = androidx.compose.ui.geometry.Offset(viewport / 2f, viewport / 2f),
-                        blendMode = BlendMode.Clear,
-                    )
-                    canvas.restore()
-                }
+        val centre = Offset(viewport / 2f, viewport / 2f)
 
-                // The ring, drawn last so it sits on top of the scrim's edge.
-                drawCircle(
-                    color = Color.White.copy(alpha = 0.9f),
-                    radius = viewport / 2f - 1f,
-                    center = androidx.compose.ui.geometry.Offset(viewport / 2f, viewport / 2f),
-                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f),
-                )
-            },
-    )
+        // 1. The picture itself, on the canvas — deliberately outside the layer below.
+        drawImage(
+            image = bitmap,
+            dstOffset = androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()),
+            dstSize = androidx.compose.ui.unit.IntSize(
+                drawWidth.toInt().coerceAtLeast(1),
+                drawHeight.toInt().coerceAtLeast(1),
+            ),
+        )
+
+        // 2. The scrim, alone in its own layer, with the crop circle cleared out of it.
+        drawIntoCanvas { canvas ->
+            canvas.saveLayer(androidx.compose.ui.geometry.Rect(Offset.Zero, size), Paint())
+            drawRect(Color.Black.copy(alpha = 0.55f))
+            drawCircle(
+                color = Color.Black,
+                radius = viewport / 2f,
+                center = centre,
+                blendMode = BlendMode.Clear,
+            )
+            canvas.restore()
+        }
+
+        // 3. The ring, last, so it sits on top of the scrim's edge.
+        drawCircle(
+            color = Color.White.copy(alpha = 0.9f),
+            radius = viewport / 2f - 1f,
+            center = centre,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f),
+        )
+    }
 }

@@ -89,11 +89,14 @@ object VoiceNotePlayer {
             player = fresh
             withContext(Dispatchers.Main) {
                 fresh.play(bytes, mimeType(attachment)) {
+                    // Guarded as a whole: a player that finishes after it has been superseded
+                    // must not report "stopped" for the note that replaced it. `stop()` fires
+                    // no callback at all, so this only ever runs at a genuine end of playback.
                     if (currentId == id) {
                         activeId = null
                         currentId = null
+                        onStateChange(false)
                     }
-                    onStateChange(false)
                 }
             }
             // Progress is polled rather than pushed: 4 Hz is smooth enough for a waveform and

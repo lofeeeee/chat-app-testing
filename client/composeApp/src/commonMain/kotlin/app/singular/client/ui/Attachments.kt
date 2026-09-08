@@ -170,7 +170,13 @@ private fun FileAttachment(attachment: AttachmentDto, tint: Color) {
  */
 @Composable
 private fun VoiceNote(attachment: AttachmentDto, tint: Color) {
-    var playing by remember { mutableStateOf(false) }
+    // Derived from the shared player, never mirrored into local state.
+    //
+    // A local `playing` flag has to be told when playback ends, and every path that forgets —
+    // a note superseded by another, a callback that arrives for a note that is no longer
+    // current — leaves the button stuck showing Stop, at which point the next click stops
+    // nothing instead of playing. Reading the one player that actually knows cannot desync.
+    val playing = VoiceNotePlayer.isPlaying(attachment.id)
     var loading by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf(0f) }
 
@@ -193,7 +199,6 @@ private fun VoiceNote(attachment: AttachmentDto, tint: Color) {
                     progress = if (duration > 0) (seconds / duration).coerceIn(0f, 1f) else 0f
                 },
                 onStateChange = { isPlaying ->
-                    playing = isPlaying
                     loading = false
                     if (!isPlaying) progress = 0f
                 },
@@ -243,16 +248,6 @@ private fun VoiceNote(attachment: AttachmentDto, tint: Color) {
                     strokeWidth = barWidth,
                 )
             }
-        }
-
-        Spacer(Modifier.width(10.dp))
-        Text(
-            formatDuration(attachment.durationMs),
-            style = MaterialTheme.typography.labelSmall,
-            color = tint.copy(alpha = 0.75f),
-        )
-    }
-}
         }
 
         Spacer(Modifier.width(10.dp))

@@ -36,6 +36,7 @@ import app.singular.client.net.UpdateRoleData
 import app.singular.client.net.isNewerSnowflake
 import app.singular.client.platform.REFRESH_TOKEN_KEY
 import app.singular.client.platform.clearSecret
+import app.singular.client.platform.AudioDeviceChoice
 import app.singular.client.platform.readLocalString
 import app.singular.client.platform.readSecret
 import app.singular.client.platform.writeLocalString
@@ -287,6 +288,29 @@ class AppState(
         set(value) {
             reduceMotionState = value
             writeLocalString(REDUCE_MOTION, value.toString())
+        }
+
+    // Audio devices. The store is the source of truth — the capture and playback code reads it
+    // directly when it opens a line, since it sits below this layer — and these two mirror it
+    // into snapshot state so the settings screen redraws when the choice changes.
+
+    private var audioInputState by mutableStateOf(AudioDeviceChoice.input)
+    private var audioOutputState by mutableStateOf(AudioDeviceChoice.output)
+
+    /** Which microphone records voice notes. null follows the system default. */
+    var audioInputDevice: String?
+        get() = audioInputState
+        set(value) {
+            audioInputState = value
+            AudioDeviceChoice.input = value
+        }
+
+    /** Which speakers play voice notes. null follows the system default. */
+    var audioOutputDevice: String?
+        get() = audioOutputState
+        set(value) {
+            audioOutputState = value
+            AudioDeviceChoice.output = value
         }
 
     /** Master switch. Off means the app never raises a system notification. */

@@ -53,8 +53,11 @@ class WebPushTransport(
         )
 
         val notification = Notification(subscription, payload)
-        client.send(notification).use { response ->
-            return when (response.statusLine.statusCode) {
+        // Not `use`: the library hands back a plain HttpResponse, which holds no resource of
+        // ours and is not Closeable. Wrapping it in `use` was a compile error, and would have
+        // been a no-op even if it weren't.
+        val response = client.send(notification)
+        return when (response.statusLine.statusCode) {
                 201 -> true
                 // 404/410: subscription expired or revoked — dead.
                 404, 410 -> false
@@ -70,7 +73,6 @@ class WebPushTransport(
                     )
                     false
                 }
-            }
         }
     }
 

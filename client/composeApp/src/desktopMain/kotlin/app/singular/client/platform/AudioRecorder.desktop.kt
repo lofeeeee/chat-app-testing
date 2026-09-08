@@ -7,6 +7,7 @@ import java.util.concurrent.atomic.AtomicLong
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioInputStream
 import javax.sound.sampled.AudioSystem
+import javax.sound.sampled.LineEvent
 import javax.sound.sampled.TargetDataLine
 import kotlin.concurrent.thread
 import kotlin.math.abs
@@ -56,7 +57,9 @@ actual class AudioRecorder {
 
     actual fun start(onError: (String) -> Unit) {
         try {
-            val target = AudioSystem.getTargetDataLine(format).also {
+            // Resolved per take, not once at construction: choosing a different microphone in
+            // settings should apply to the next thing you record, without a restart.
+            val target = openMicrophone(format).also {
                 it.open(format)
                 it.start()
             }
@@ -142,6 +145,27 @@ actual class AudioRecorder {
 }
 
 /**
+ * Opens the chosen microphone, or the system default.
+ *
+ * A device that is no longer connected falls back rather than throwing. Someone who unplugs a
+ * headset should get their built-in microphone back, not a recorder that fails at the moment
+ * they start speaking — and the setting is left alone, so the headset is used again when it
+ * returns.
+ */
+private fun openMicrophone(format: AudioFormat): TargetDataLine {
+    val chosen = mixerNamed(AudioDeviceChoice.input)
+        ?: return AudioSystem.getTargetDataLine(format)
+    return runCatching { AudioSystem.getTargetDataLine(format, chosen) }
+        .getOrElse { AudioSystem.getTargetDataLine(format) }
+}
+
+/** Opens a clip on the chosen speakers, or the system default. Same fallback as the mic. */
+private fun openClip(): javax.sound.sampled.Clip {
+    val chosen = mixerNamed(AudioDeviceChoice.output) ?: return AudioSystem.getClip()
+    return runCatching { AudioSystem.getClip(chosen) }.getOrElse { AudioSystem.getClip() }
+}
+
+/**
  * Desktop playback: a `Clip`, not a `SourceDataLine`.
  *
  * One short voice note doesn't need a stream, and a Clip gives position and stop for free.
@@ -149,16 +173,38 @@ actual class AudioRecorder {
  */
 actual class AudioPlayer {
 
-    private var clip: javax.sound.sampled.Clip? = null
+    /**
+     * One run of one clip.
+     *
+     * Each play gets its own, so a late event from a clip that has been superseded can be
+     * recognised as stale rather than acted on: [cancelled] marks a stop we asked for, and
+     * [finished] makes the end-of-playback bookkeeping run exactly once however it is reached.
+     */
+    private class Playback(val clip: javax.sound.sampled.Clip) {
+        val finished = AtomicBoolean(false)
+
+        @Volatile
+        var cancelled = false
+    }
+
+    @Volatile
+    private var current: Playback? = null
+
     private var watcher: Thread? = null
 
-    @Volatile
-    actual var isPlaying: Boolean = false
-        private set
+    // Private volatile backing fields, read-only `val` actuals over them.
+    //
+    // `actual var … private set` does not satisfy `expect val`: Kotlin matches property *kind*,
+    // and a var with a private setter is still a var. Read-only is also the honest contract —
+    // playback position is something the clip reports, not something a caller may assign.
+    // Volatile because the watcher thread writes both and the UI thread polls them.
+    @Volatile private var playing = false
 
-    @Volatile
-    actual var positionSeconds: Float = 0f
-        private set
+    @Volatile private var position = 0f
+
+    actual val isPlaying: Boolean get() = playing
+
+    actual val positionSeconds: Float get() = position
 
     actual fun play(bytes: ByteArray, mimeType: String, onEnded: () -> Unit) {
         stop()
@@ -170,7 +216,7 @@ actual class AudioPlayer {
             return
         }
 
-        val newClip = runCatching { AudioSystem.getClip() }.getOrNull()
+        val newClip = runCatching { openClip() }.getOrNull()
         if (newClip == null) {
             onEnded()
             return
@@ -180,30 +226,59 @@ actual class AudioPlayer {
             return
         }
 
-        clip = newClip
-        positionSeconds = 0f
-        isPlaying = true
-        newClip.start()
+        val playback = Playback(newClip)
+        current = playback
 
-        watcher = thread(name = "voice-playback", isDaemon = true) {
-            while (isPlaying && newClip.isRunning) {
-                positionSeconds = newClip.microsecondPosition / 1_000_000f
-                Thread.sleep(50)
+        // End of playback is an event from the line, not something to poll for.
+        //
+        // `Clip.start()` is asynchronous: `isRunning` stays false for a moment after it
+        // returns. The watcher below used to read `while (playing && clip.isRunning)`, so it
+        // could see "not running" *before playback had begun*, treat that as the end, and close
+        // the clip on the spot. The first note of a session won its race — opening the audio
+        // device the first time is slow enough to cover the gap — and every replay afterwards
+        // lost it, which is why a voice note played once and then never again. A STOP event is
+        // the device saying it is done, so there is no race left to lose.
+        newClip.addLineListener { event ->
+            if (event.type != LineEvent.Type.STOP) return@addLineListener
+            if (playback.cancelled) return@addLineListener
+            if (!playback.finished.compareAndSet(false, true)) return@addLineListener
+
+            // Only speak for the playback that is still current: a stale clip finishing must
+            // not reset the position of the note that replaced it.
+            if (current === playback) {
+                playing = false
+                position = 0f
+                current = null
             }
-            isPlaying = false
-            positionSeconds = 0f
             runCatching { newClip.close() }
             onEnded()
+        }
+
+        position = 0f
+        playing = true
+        newClip.start()
+
+        // Position only — this thread no longer decides when playback is over.
+        watcher = thread(name = "voice-playback", isDaemon = true) {
+            while (current === playback && playing) {
+                position = newClip.microsecondPosition / 1_000_000f
+                Thread.sleep(50)
+            }
         }
     }
 
     actual fun stop() {
-        isPlaying = false
-        runCatching { clip?.stop() }
-        runCatching { clip?.close() }
-        clip = null
+        // A stop we asked for fires no `onEnded`. The caller already knows it stopped, and the
+        // callback would otherwise land on whichever note it starts next.
+        val playback = current
+        playback?.cancelled = true
+        playback?.finished?.set(true)
+        current = null
+        playing = false
+        runCatching { playback?.clip?.stop() }
+        runCatching { playback?.clip?.close() }
         watcher = null
-        positionSeconds = 0f
+        position = 0f
     }
 }
 

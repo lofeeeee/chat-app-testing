@@ -225,14 +225,18 @@ class MentionResolver(
 }
 
 /**
- * Message body: attachments, rich text (mentions + emoji font), reactions.
+ * Message body: attachments and rich text (mentions + emoji font).
+ *
+ * Reactions are **not** drawn here. They used to be, which meant that in the bubbles layout they
+ * were rendered inside the bubble's clip and background — a pill sitting on the message's own
+ * colour, reading as part of what was said rather than as a response to it. Each layout now
+ * places them itself: under the text in compact, under the whole bubble in bubbles.
  */
 @Composable
 private fun MessageBody(
     message: MessageDto,
     foreground: androidx.compose.ui.graphics.Color,
     resolver: MentionResolver,
-    onReact: (emoji: String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AttachmentBlock(message.attachments, message.location, foreground)
@@ -243,10 +247,6 @@ private fun MessageBody(
                 style = MaterialTheme.typography.bodyLarge,
                 color = foreground,
             )
-        }
-
-        if (message.reactions.isNotEmpty()) {
-            ReactionChips(message.reactions, onReact)
         }
     }
 }
@@ -259,9 +259,10 @@ private fun MessageBody(
 fun ReactionChips(
     reactions: List<app.singular.client.net.ReactionDto>,
     onReact: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val emojiFont = emojiFontFamily()
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         reactions.forEach { reaction ->
             val mine = reaction.me
             val shape = RoundedCornerShape(999.dp)
@@ -381,10 +382,14 @@ private fun BubbleRow(
 ) {
     val message = row.message
 
-    // The same "you were tagged" treatment as the compact layout: a wash across the whole row
-    // and a bar down the left edge. It was previously a 3dp bar *inside* the bubble, which
-    // drew on top of the first character of the message and vanished entirely on your own
-    // messages, where the bubble is already accent-coloured.
+    // The same "you were tagged" treatment as the compact layout: a bar down the left edge and
+    // a wash behind the message. It was previously a 3dp bar *inside* the bubble, which drew on
+    // top of the first character of the message and vanished entirely on your own messages,
+    // where the bubble is already accent-coloured.
+    //
+    // The wash covers the message and its reactions only — not the author's name above it.
+    // Highlighting the name says the *person* is marked; what was marked is the one message
+    // that addressed you, and on a run of messages the name belongs to all of them.
     val mentioned = resolver.mentionsMe(message.content)
     val accent = LocalSingularColors.current.accentSoft
 
@@ -392,7 +397,6 @@ private fun BubbleRow(
         Modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
-            .background(if (mentioned) accent.copy(alpha = 0.10f) else Color.Transparent)
             .padding(vertical = 1.dp),
         horizontalArrangement = if (row.mine) Arrangement.End else Arrangement.Start,
     ) {
@@ -434,7 +438,24 @@ private fun BubbleRow(
                 )
             }
 
-            Bubble(row, resolver, onReact, onMessageLongPress)
+            Column(
+                horizontalAlignment = if (row.mine) Alignment.End else Alignment.Start,
+                modifier = Modifier
+                    .background(if (mentioned) accent.copy(alpha = 0.10f) else Color.Transparent)
+                    .padding(vertical = 2.dp),
+            ) {
+                Bubble(row, resolver, onMessageLongPress)
+
+                // Outside the bubble, tucked under its edge — a response to the message rather
+                // than part of it, and legible on the canvas instead of on the bubble's fill.
+                if (message.reactions.isNotEmpty()) {
+                    ReactionChips(
+                        message.reactions,
+                        onReact = { emoji -> onReact(message.id, emoji) },
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
         }
 
         if (row.mine) Spacer(Modifier.width(8.dp))
@@ -446,7 +467,6 @@ private fun BubbleRow(
 private fun Bubble(
     row: RenderedMessage,
     resolver: MentionResolver,
-    onReact: (String, String) -> Unit,
     onMessageLongPress: (MessageDto) -> Unit,
 ) {
     val message = row.message
@@ -482,9 +502,7 @@ private fun Bubble(
             TextButton(onClick = { revealed = true }) { Text("Blocked message — show") }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                MessageBody(message, foreground, resolver) { emoji ->
-                    onReact(message.id, emoji)
-                }
+                MessageBody(message, foreground, resolver)
 
                 // Time inside the bubble, trailing the text.
                 //
@@ -519,10 +537,13 @@ private fun CompactRow(
     val message = row.message
     var revealed by remember(message.id) { mutableStateOf(false) }
 
-    // Discord's "you were pinged" treatment: the whole row gets a wash of the accent and a
+    // Discord's "you were pinged" treatment: a wash of the accent behind the message and a
     // solid bar down the left edge. The bar matters as much as the tint — a tint alone is a
     // colour difference, which is exactly what someone with a colour-vision deficiency will
     // miss while scrolling past the one message that was actually addressed to them.
+    //
+    // The wash stops short of the author's name: what was marked is this message, and on a run
+    // of messages the name at the top belongs to every one of them, not to the tagged one.
     val mentioned = resolver.mentionsMe(message.content)
     val accent = LocalSingularColors.current.accentSoft
 
@@ -533,10 +554,6 @@ private fun CompactRow(
             // own height. Without it, a Row is wrap-content and fillMaxHeight would take the
             // incoming maximum — the height of the whole viewport, not of the message.
             .height(IntrinsicSize.Min)
-            .background(
-                if (mentioned) accent.copy(alpha = 0.10f)
-                else Color.Transparent
-            )
             .padding(vertical = 1.dp),
         verticalAlignment = Alignment.Top,
     ) {
@@ -589,11 +606,23 @@ private fun CompactRow(
                 }
             }
 
-            if (message.authorBlocked && !revealed) {
-                TextButton(onClick = { revealed = true }) { Text("Blocked message — show") }
-            } else {
-                MessageBody(message, MaterialTheme.colorScheme.onSurface, resolver) { emoji ->
-                    onReact(message.id, emoji)
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(if (mentioned) accent.copy(alpha = 0.10f) else Color.Transparent)
+            ) {
+                if (message.authorBlocked && !revealed) {
+                    TextButton(onClick = { revealed = true }) { Text("Blocked message — show") }
+                } else {
+                    MessageBody(message, MaterialTheme.colorScheme.onSurface, resolver)
+                }
+
+                if (message.reactions.isNotEmpty()) {
+                    ReactionChips(
+                        message.reactions,
+                        onReact = { emoji -> onReact(message.id, emoji) },
+                        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp),
+                    )
                 }
             }
         }

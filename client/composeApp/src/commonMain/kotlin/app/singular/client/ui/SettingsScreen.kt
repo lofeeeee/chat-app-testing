@@ -18,20 +18,25 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -39,12 +44,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.singular.client.AppState
 import app.singular.client.platform.notificationsAvailable
+import app.singular.client.platform.AudioDevice
+import app.singular.client.platform.inputDevices
+import app.singular.client.platform.outputDevices
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Settings.
@@ -82,6 +93,7 @@ fun SettingsScreen(state: AppState, onClose: () -> Unit) {
                 SettingsSection.APPEARANCE -> AppearanceSection(state)
                 SettingsSection.PRIVACY -> PrivacySection(state)
                 SettingsSection.NOTIFICATIONS -> NotificationsSection(state)
+                SettingsSection.SYSTEM -> SystemSection(state)
                 SettingsSection.ABOUT -> AboutSection()
             }
 
@@ -109,6 +121,7 @@ enum class SettingsSection(val title: String, val blurb: String) {
     APPEARANCE("Appearance", "Theme and chat layout"),
     PRIVACY("Privacy", "Blocked and muted"),
     NOTIFICATIONS("Notifications", "Alerts on this device"),
+    SYSTEM("System", "Microphone and speakers"),
     ABOUT("About", "Version and shortcuts"),
 }
 
@@ -779,6 +792,158 @@ private fun NotificationsSection(state: AppState) {
         )
     }
 }
+
+// ---------------------------------------------------------------------------
+// System — audio devices
+// ---------------------------------------------------------------------------
+
+/**
+ * Which microphone records and which speakers play.
+ *
+ * Re-enumerated every time a menu is opened, rather than once at launch or behind a Refresh
+ * button. Headsets come and go while the app is running, so any cached list is wrong sooner or
+ * later — and the moment someone opens the menu is exactly when they want the truth. A button
+ * that says "refresh" is asking the user to do the work of noticing that.
+ */
+@Composable
+private fun SystemSection(state: AppState) {
+    var inputs by remember { mutableStateOf<List<AudioDevice>>(emptyList()) }
+    var outputs by remember { mutableStateOf<List<AudioDevice>>(emptyList()) }
+    var scanned by remember { mutableStateOf(false) }
+    var scans by remember { mutableStateOf(0) }
+
+    LaunchedEffect(scans) {
+        // Off the UI thread: opening the audio subsystem to ask what exists can block for long
+        // enough to drop a frame, and it happens the moment this pane is shown.
+        val found = withContext(Dispatchers.Default) { inputDevices() to outputDevices() }
+        inputs = found.first
+        outputs = found.second
+        scanned = true
+    }
+
+    SettingsCard {
+        SettingsCardTitle("Audio devices")
+        Text(
+            "Which microphone voice notes record from, and which speakers they play back " +
+                "through. Saved on this machine rather than to your account — a headset name " +
+                "means nothing on a computer that doesn't have it plugged in.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        DevicePicker(
+            label = "Microphone",
+            devices = inputs,
+            selected = state.audioInputDevice,
+            onSelect = { state.audioInputDevice = it },
+            onOpen = { scans++ },
+            scanned = scanned,
+            // Applied when recording starts, so it takes effect on the next voice note rather
+            // than needing a restart — worth saying, because the alternative is people
+            // restarting the app to be sure.
+            note = "Used from your next voice note onwards.",
+        )
+
+        DevicePicker(
+            label = "Speakers",
+            devices = outputs,
+            selected = state.audioOutputDevice,
+            onSelect = { state.audioOutputDevice = it },
+            onOpen = { scans++ },
+            scanned = scanned,
+            note = "Used from the next voice note you play.",
+        )
+    }
+}
+
+/**
+ * One device menu.
+ *
+ * "System default" is a real entry rather than an absence, because "follow whatever Windows is
+ * doing" is a choice people make deliberately and need to be able to get back to.
+ */
+@Composable
+private fun DevicePicker(
+    label: String,
+    devices: List<AudioDevice>,
+    selected: String?,
+    onSelect: (String?) -> Unit,
+    /** Rescan. Called as the menu opens, so what it lists is what is plugged in right now. */
+    onOpen: () -> Unit,
+    scanned: Boolean,
+    note: String,
+) {
+    var open by remember { mutableStateOf(false) }
+    val chosen = devices.firstOrNull { it.id == selected }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+
+        when {
+            !scanned -> Text(
+                "Looking for devices…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            devices.isEmpty() -> Text(
+                "This device doesn't offer a choice — audio follows whatever the system picked.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            else -> {
+                Box {
+                    // Rescan first, then open: the scan is asynchronous, so the menu appears
+                    // immediately with what was known and fills in as the answer arrives.
+                    OutlinedButton(
+                        onClick = { onOpen(); open = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            chosen?.label ?: SYSTEM_DEFAULT,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Icon(Icons.Filled.ExpandMore, contentDescription = null)
+                    }
+                    DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                        DropdownMenuItem(
+                            text = { Text(SYSTEM_DEFAULT) },
+                            onClick = { onSelect(null); open = false },
+                        )
+                        devices.forEach { device ->
+                            DropdownMenuItem(
+                                text = { Text(device.label) },
+                                onClick = { onSelect(device.id); open = false },
+                            )
+                        }
+                    }
+                }
+
+                // A saved device that isn't in the list is unplugged, not forgotten. The audio
+                // code falls back to the default and keeps the setting, so it comes back on its
+                // own — but silently swapping someone's microphone deserves saying out loud.
+                if (selected != null && chosen == null) {
+                    Text(
+                        "“$selected” isn't connected. The system default is being used until it is.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+
+                Text(
+                    note,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+private const val SYSTEM_DEFAULT = "System default"
 
 @Composable
 private fun AboutSection() {

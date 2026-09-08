@@ -152,13 +152,16 @@ actual class AudioPlayer {
     private var watcher: Thread? = null
     private var temp: File? = null
 
-    @Volatile
-    actual var isPlaying: Boolean = false
-        private set
+    // Private volatile backing fields, read-only vals over them. See the desktop player:
+    // `actual var ... private set` does not satisfy `expect val`, because Kotlin matches
+    // property kind and a var with a private setter is still a var.
+    @Volatile private var playing = false
 
-    @Volatile
-    actual var positionSeconds: Float = 0f
-        private set
+    @Volatile private var position = 0f
+
+    actual val isPlaying: Boolean get() = playing
+
+    actual val positionSeconds: Float get() = position
 
     actual fun play(bytes: ByteArray, mimeType: String, onEnded: () -> Unit) {
         stop()
@@ -173,7 +176,7 @@ actual class AudioPlayer {
         val mp = runCatching {
             MediaPlayer().apply {
                 setDataSource(file.absolutePath)
-                setOnCompletionListener { isPlaying = false; positionSeconds = 0f; onEnded() }
+                setOnCompletionListener { playing = false; position = 0f; onEnded() }
                 prepare()
                 start()
             }
@@ -183,24 +186,24 @@ actual class AudioPlayer {
             return
         }
         player = mp
-        isPlaying = true
+        playing = true
 
         watcher = thread(name = "voice-position", isDaemon = true) {
-            while (isPlaying) {
-                positionSeconds = runCatching { mp.currentPosition / 1000f }.getOrDefault(0f)
+            while (playing) {
+                position = runCatching { mp.currentPosition / 1000f }.getOrDefault(0f)
                 Thread.sleep(100)
             }
         }
     }
 
     actual fun stop() {
-        isPlaying = false
+        playing = false
         runCatching { player?.release() }
         player = null
         watcher = null
         temp?.delete()
         temp = null
-        positionSeconds = 0f
+        position = 0f
     }
 }
 

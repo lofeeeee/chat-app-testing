@@ -281,7 +281,19 @@ private fun TextBand(
             .offset(y = frameHeight * overlay.y.coerceIn(0f, 1f))
             .fillMaxWidth()
             .padding(horizontal = 20.dp)
-            .then(if (editable) Modifier.gestureLayer(onTap, onDragY, onTransform) else Modifier)
+            // Named, not positional: [gestureLayer] takes both a two-axis `onDrag` and a
+            // one-axis `onDragY`, so a positional call silently slides `onDragY` into the
+            // `onDrag` slot. Text moves on one axis only — its horizontal position is an
+            // alignment, not a coordinate — so it is the `onDragY` half that applies here.
+            .then(
+                if (editable) {
+                    Modifier.gestureLayer(
+                        onTap = onTap,
+                        onDragY = onDragY,
+                        onTransform = onTransform,
+                    )
+                } else Modifier
+            )
             .rotate(overlay.rotation)
             .scale(overlay.scale.coerceIn(0.3f, 4f)),
         contentAlignment = when (overlay.align) {
@@ -374,8 +386,6 @@ private fun BoxScope.SelectionRing() {
                 shape = RoundedCornerShape(6.dp),
             )
     )
-}
-
 }
 
 /**

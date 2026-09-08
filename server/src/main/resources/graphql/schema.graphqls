@@ -376,6 +376,16 @@ enum ThemePreset {
   DUSK
   "Cool charcoal, dusty blue accent."
   SLATE
+  "Deep navy, cyan accent."
+  MIDNIGHT
+  "Neutral graphite, no cast at all."
+  CARBON
+  "Dark burgundy, soft crimson accent."
+  WINE
+  "Warm paper, ink accent. Designed light."
+  PAPER
+  "Cool white, glacier blue. Designed light."
+  FROST
 }
 
 type UserSettings {

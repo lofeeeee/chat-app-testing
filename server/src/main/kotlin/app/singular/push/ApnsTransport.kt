@@ -2,18 +2,13 @@ package app.singular.push
 
 import app.singular.config.SingularProperties
 import com.fasterxml.jackson.databind.ObjectMapper
-import org.bouncycastle.asn1.pkcs.PrivateKeyInfo
-import org.bouncycastle.openssl.PEMParser
-import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter
 import org.slf4j.LoggerFactory
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
-import java.security.KeyFactory
 import java.security.Signature
 import java.security.interfaces.ECPrivateKey
-import java.security.spec.PKCS8EncodedKeySpec
 import java.time.Instant
 import java.util.Base64
 
@@ -131,17 +126,9 @@ class ApnsTransport(
         return r to s
     }
 
-    private fun parseP8(pem: String): ECPrivateKey {
-        PEMParser(pem.reader()).use { parser ->
-            val obj = parser.readObject() ?: error("Unparseable .p8 PEM")
-            val info = when (obj) {
-                is PrivateKeyInfo -> obj
-                else -> error("Expected a PKCS#8 EC key, got ${obj::class.simpleName}")
-            }
-            val spec = PKCS8EncodedKeySpec(info.encoded)
-            return KeyFactory.getInstance("EC").generatePrivate(spec) as ECPrivateKey
-        }
-    }
+    /** An APNs `.p8` is a PKCS#8 EC key, which the JDK reads directly — see [PemKeys]. */
+    private fun parseP8(pem: String): ECPrivateKey =
+        PemKeys.readPkcs8(pem, "EC") as ECPrivateKey
 
     private fun b64url(bytes: ByteArray): String =
         Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
