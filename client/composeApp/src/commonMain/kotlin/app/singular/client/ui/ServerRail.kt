@@ -7,7 +7,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.draganddrop.dragAndDropSource
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,10 +26,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
-import androidx.compose.ui.draganddrop.DragAndDropTransferData
-import androidx.compose.ui.draganddrop.startTransfer
-import androidx.compose.ui.platform.ClipData
-import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -142,6 +137,10 @@ fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
 
         val rows = state.railRows()
         items(rows, key = { row -> railRowKey(row) }) { row ->
+            // Per-item, not hoisted: animateItem() is a LazyItemScope extension and only
+            // exists inside the item lambda. Reduced motion opts out of the animation.
+            val rowModifier =
+                if (LocalReducedMotion.current) Modifier else Modifier.animateItem()
             when (row) {
                 is RailRow.Folder -> FolderTile(
                     folder = row.folder,
@@ -154,13 +153,14 @@ fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
                     onRemoveGuild = { guildId -> state.removeGuildFromFolder(guildId, row.folder.id) },
                     onRename = { name -> state.renameFolder(row.folder.id, name) },
                     onDelete = { state.deleteFolder(row.folder.id) },
+                    modifier = rowModifier,
                 )
 
                 is RailRow.Guild -> GuildTile(
                     state = state,
                     guild = row.guild,
                     folderId = row.folderId,
-                    rows = rows,
+                    modifier = rowModifier,
                 )
             }
         }
@@ -251,20 +251,19 @@ private fun GuildTile(
     state: AppState,
     guild: GuildDto,
     folderId: String?,
-    rows: List<RailRow>,
+    modifier: Modifier = Modifier,
 ) {
     var dropping by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
 
     Box(
-        Modifier
+        modifier
             .fillMaxWidth()
-            .animateItem()
             // -- drop -------------------------------------------------------
             .dragAndDropTarget(
-                shouldStartDragAndDrop = { start ->
-                    start.mimeTypes().contains(GUILD_MIME) || start.mimeTypes().isEmpty()
-                },
+                // The drag never leaves the app (rail to rail), so any drag can land here;
+                // the payload is read from the module-scoped draggedGuildId, not the event.
+                shouldStartDragAndDrop = { true },
                 target = remember {
                     object : DragAndDropTarget {
                         override fun onStarted(event: DragAndDropEvent) {
@@ -287,25 +286,14 @@ private fun GuildTile(
                 },
             )
             // -- drag -------------------------------------------------------
-            // Long-press to start, not tap: the rail is the control people hit most often, and
-            // a tile that only drags is a tile that no longer opens.
+            // The framework's default start detector (long-press) fires this block, which sets
+            // the payload and returns it. Long-press rather than tap: the rail is the control
+            // people hit most often, and a tile that only drags is a tile that no longer opens.
             .dragAndDropSource(
                 drawDragDecoration = { drawRect(Color.White.copy(alpha = 0.25f)) },
             ) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = {
-                        draggedGuildId = guild.id
-                        startTransfer(
-                            DragAndDropTransferData(
-                                // The id is the payload. It's not a secret and it isn't
-                                // trusted — the server re-checks membership on every write.
-                                ClipEntry(ClipData(ClipData.PlainText(guild.id))),
-                            )
-                        )
-                    },
-                    onDragEnd = { draggedGuildId = null },
-                    onDragCancel = { draggedGuildId = null },
-                )
+                draggedGuildId = guild.id
+                guildDragPayload(guild.id)
             },
         contentAlignment = Alignment.Center,
     ) {
@@ -380,6 +368,7 @@ private fun FolderTile(
     onRemoveGuild: (String) -> Unit,
     onRename: (String) -> Unit,
     onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var dropping by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
@@ -394,9 +383,8 @@ private fun FolderTile(
     }
 
     Box(
-        Modifier
+        modifier
             .fillMaxWidth()
-            .animateItem()
             .dragAndDropTarget(
                 shouldStartDragAndDrop = { true },
                 target = remember(folder.id) {
@@ -545,7 +533,10 @@ private fun FolderNameDialog(
  */
 private var draggedGuildId: String? = null
 
-private const val GUILD_MIME = "text/plain"
+@Composable
+private fun AddServerDialog(
+    onDismiss: () -> Unit,
+    onCreate: (String) -> Unit,
     onJoin: (String) -> Unit,
 ) {
     var name by remember { mutableStateOf("") }

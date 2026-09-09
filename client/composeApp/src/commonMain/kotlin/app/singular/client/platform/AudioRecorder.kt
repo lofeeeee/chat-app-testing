@@ -49,9 +49,9 @@ expect class AudioRecorder() {
  * other is never what anyone meant — starting one stops the last.
  */
 expect class AudioPlayer() {
-    val isPlaying: Boolean
+    var isPlaying: Boolean
     /** Seconds elapsed, updated by the platform's own progress source. */
-    val positionSeconds: Float
+    var positionSeconds: Float
 
     fun play(bytes: ByteArray, mimeType: String, onEnded: () -> Unit)
     fun stop()

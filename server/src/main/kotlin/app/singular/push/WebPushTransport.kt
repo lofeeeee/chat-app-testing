@@ -53,7 +53,8 @@ class WebPushTransport(
         )
 
         val notification = Notification(subscription, payload)
-        client.send(notification).use { response ->
+        val response = client.send(notification)
+        try {
             return when (response.statusLine.statusCode) {
                 201 -> true
                 // 404/410: subscription expired or revoked — dead.
@@ -71,6 +72,10 @@ class WebPushTransport(
                     false
                 }
             }
+        } finally {
+            // Close the response if it's Closeable (the library's HTTP client returns one);
+            // a non-Closeable response just gets left to the client pool, which reuses it.
+            runCatching { (response as? java.io.Closeable)?.close() }
         }
     }
 

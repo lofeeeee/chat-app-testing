@@ -1,6 +1,8 @@
 package app.singular.client.ui
 
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -100,7 +102,11 @@ fun RailIndicator(selected: Boolean, unread: Boolean, modifier: Modifier = Modif
         unread -> 9.dp
         else -> 0.dp
     }
-    val height by animateDpAsState(targetValue = target, label = "rail-indicator")
+    val height by animateDpAsState(
+        targetValue = target,
+        animationSpec = if (LocalReducedMotion.current) snap() else tween(Motion.BASE),
+        label = "rail-indicator",
+    )
 
     Box(
         modifier

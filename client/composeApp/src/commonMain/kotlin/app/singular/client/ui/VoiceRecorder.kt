@@ -1,6 +1,7 @@
 package app.singular.client.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -90,10 +91,11 @@ fun RecordingBar(
         Spacer(Modifier.width(8.dp))
 
         // Live level: a dot that swells, because a waveform of a take in progress implies a
-        // precision the meter doesn't have.
+        // precision the meter doesn't have. Snapped under reduced motion.
+        val reducedMotion = LocalReducedMotion.current
         val dotSize by animateFloatAsState(
             targetValue = 10f + level * 14f,
-            animationSpec = tween(80),
+            animationSpec = if (reducedMotion) snap() else tween(80),
             label = "record-level",
         )
         Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {

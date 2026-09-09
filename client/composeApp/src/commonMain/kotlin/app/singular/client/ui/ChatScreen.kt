@@ -5,11 +5,14 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,7 +35,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsOff
@@ -42,6 +47,7 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -58,12 +64,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,10 +81,17 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.ui.input.key.Key
+import kotlinx.coroutines.launch
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -93,6 +109,7 @@ import androidx.compose.ui.unit.sp
 import app.singular.client.AppState
 import app.singular.client.net.ChannelDto
 import app.singular.client.net.GuildDto
+import app.singular.client.net.MessageDto
 import app.singular.client.net.UserDto
 
 /**
@@ -209,9 +226,16 @@ fun ChatScreen(
                 // Fills what's left when it's the only pane, so a narrow window shows a full
                 // list rather than a 260dp column beside dead space.
                 if (compact) Modifier.weight(1f).fillMaxHeight()
-                else Modifier.width(panelWidth(expanded = 260.dp, medium = 224.dp)).fillMaxHeight(),
+                else Modifier.width(state.sidebarWidthDp.dp).fillMaxHeight(),
             )
-            VerticalDivider()
+
+            // A draggable divider: wide enough to be grabbable, visually a hairline. Dragging
+            // it resizes the sidebar, which is the one thing every desktop chat client lets
+            // you do that this one didn't.
+            ResizableDivider(
+                widthDp = state.sidebarWidthDp,
+                onResize = { state.sidebarWidthDp = it },
+            )
         }
 
         if (!compact || !showSidebar) {
@@ -221,7 +245,7 @@ fun ChatScreen(
                 // channel's data mid-transition — a fade from one thing to itself. Route
                 // transitions (App) and list items animate; conversation switching stays
                 // instant, which is also what every chat app does.
-                if (state.selectedChannel == null) EmptyState(state)
+                if (state.selectedChannel == null) HomeEmptyState(state)
                 else Conversation(state, composerFocus, showBack = compact)
             }
         }
@@ -354,9 +378,37 @@ private fun DirectMessageHome(
             )
         }
 
-        when (tab) {
-            HomeTab.CHATS -> ConversationList(state, onNewGroup = { creatingGroup = true })
-            HomeTab.FRIENDS -> FriendsTab(state, handleFocus, onNewGroup = { creatingGroup = true })
+        // A pager, not a `when`: swiping and tapping land on the same page, and the indicator
+        // animates across rather than two instant swaps. The two pages are different enough —
+        // a list of chats and a form — that this reads as one home with two halves, not two
+        // screens stacked.
+        val pagerState = rememberPagerState(initialPage = tab.ordinal, pageCount = { 2 })
+
+        // Tab → page and page → tab, kept in one place so they can never disagree about which
+        // half is showing. Swiping is direct manipulation, so it is not gated on reduced
+        // motion; only the tap-triggered animated scroll is. The reduced-motion read happens
+        // at composition time (it must — it's a composable), and the effect captures it.
+        val reducedMotion = LocalReducedMotion.current
+        LaunchedEffect(tab) {
+            if (pagerState.currentPage != tab.ordinal) {
+                if (reducedMotion) pagerState.scrollToPage(tab.ordinal)
+                else pagerState.animateScrollToPage(tab.ordinal)
+            }
+        }
+        LaunchedEffect(pagerState.currentPage, pagerState.isScrollInProgress) {
+            if (!pagerState.isScrollInProgress && pagerState.currentPage != tab.ordinal) {
+                onTabChange(HomeTab.entries[pagerState.currentPage])
+            }
+        }
+
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxSize(),
+        ) { page ->
+            when (page) {
+                0 -> ConversationList(state, onNewGroup = { creatingGroup = true })
+                else -> FriendsTab(state, handleFocus, onNewGroup = { creatingGroup = true })
+            }
         }
     }
 }
@@ -364,17 +416,14 @@ private fun DirectMessageHome(
 @Composable
 private fun ConversationList(state: AppState, onNewGroup: () -> Unit) {
     if (state.channels.isEmpty()) {
-        Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    "No conversations yet. Open the Friends tab to start one.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(Modifier.height(10.dp))
-                TextButton(onClick = onNewGroup) { Text("Or start a group") }
-            }
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            EmptyState(
+                icon = Icons.AutoMirrored.Filled.Chat,
+                title = "No conversations yet",
+                hint = "Open the Friends tab to start one.",
+                actionLabel = "Or start a group",
+                onAction = onNewGroup,
+            )
         }
         return
     }
@@ -397,7 +446,9 @@ private fun ConversationList(state: AppState, onNewGroup: () -> Unit) {
 
     LazyColumn(Modifier.fillMaxSize()) {
         items(state.channels, key = { it.id }) { channel ->
-            Box(Modifier.animateItem()) {
+            // animateItem() is LazyItemScope-scoped — it must live inside the item lambda.
+            val itemMod = if (LocalReducedMotion.current) Modifier else Modifier.animateItem()
+            Box(itemMod) {
                 DirectMessageRow(
                     channel = channel,
                     selfId = state.currentUser?.id,
@@ -478,7 +529,7 @@ private fun FriendsTab(state: AppState, handleFocus: FocusRequester, onNewGroup:
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .animateItem()
+                        .then(if (LocalReducedMotion.current) Modifier else Modifier.animateItem())
                         .clickable {
                             state.channels
                                 .firstOrNull { c -> c.members.any { it.id == person.id } }
@@ -685,9 +736,11 @@ private fun LazyListScope.channelGroup(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // The chevron rotates rather than swapping glyphs, so the control reads as the
-            // same object in both states.
+            // same object in both states. Snapped under reduced motion.
+            val reducedMotion = LocalReducedMotion.current
             val turn by animateFloatAsState(
                 targetValue = if (isCollapsed) -90f else 0f,
+                animationSpec = if (reducedMotion) snap() else tween(Motion.BASE),
                 label = "category-chevron",
             )
             Icon(
@@ -933,6 +986,7 @@ private fun Conversation(
     // as long as this screen is alive.
     val drafts = remember { mutableStateMapOf<String, String>() }
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     val channel = state.selectedChannel ?: return
     val other = channel.members.firstOrNull { it.id != state.currentUser?.id }
     var draft by remember(channel.id) { mutableStateOf(drafts[channel.id].orEmpty()) }
@@ -946,6 +1000,53 @@ private fun Conversation(
     // closed, "composer" = inserting into the draft, anything else = reacting to that message.
     var pickerTarget by remember { mutableStateOf<String?>(null) }
     val recents = rememberRecentEmoji()
+
+    // Edit-in-place. Non-null while the composer is in "editing message X" mode: the field is
+    // pre-filled with that message's text, Enter commits the edit (not a new send), and Esc or
+    // a channel switch abandons it. Kept per channel with the drafts so switching conversations
+    // can't commit an edit into the wrong chat — the same bug drafts exist to prevent.
+    var editingMessage by remember(channel.id) { mutableStateOf<MessageDto?>(null) }
+
+    // Entering edit mode seeds the field with the message's current text. A separate effect
+    // rather than doing it at the call site, because the long-press sheet only sets the state;
+    // keeping every transition through one place means Esc-abandon and Cancel-abandon clear
+    // the draft identically too.
+    LaunchedEffect(editingMessage?.id) {
+        val target = editingMessage ?: return@LaunchedEffect
+        draft = target.content.orEmpty()
+        runCatching { composerFocus.requestFocus() }
+    }
+
+    // In-channel search. Results are held as plain ids + previews rather than rendered
+    // MessageDtos so the strip stays a summary; tapping a result scrolls to it if it's in
+    // the loaded window, and says so when it isn't (older than the loaded page).
+    var searching by remember(channel.id) { mutableStateOf(false) }
+    var searchQuery by remember(channel.id) { mutableStateOf("") }
+    var searchResults by remember(channel.id) { mutableStateOf<List<MessageDto>?>(null) }
+
+    // Debounced: one query per pause in typing, not per keystroke — search is a
+    // rate-limited server operation, and hammering it with "a", "ap", "app" burns the
+    // bucket before the user has finished typing the word.
+    LaunchedEffect(searchQuery, channel.id) {
+        if (!searching) return@LaunchedEffect
+        if (searchQuery.isBlank()) {
+            searchResults = null
+            return@LaunchedEffect
+        }
+        kotlinx.coroutines.delay(350)
+        state.searchChannel(searchQuery) { results ->
+            searchResults = results
+        }
+    }
+
+    // Closing the strip clears results so reopening doesn't show the previous query's
+    // stale matches over a different one.
+    LaunchedEffect(searching) {
+        if (!searching) {
+            searchQuery = ""
+            searchResults = null
+        }
+    }
 
     // Resolves <@id> and friends for rendering. Built from every user the client knows about
     // in this conversation plus the guild's roles/channels, and rebuilt when they change.
@@ -969,14 +1070,43 @@ private fun Conversation(
     // The plate behind a mention, in the composer and the message list alike.
     val mentionTint = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
 
+    // -- Scroll following ------------------------------------------------------
+    //
+    // Follow new messages only while the user is already at the bottom. Scrolling up to read
+    // history must not be interrupted by a message arriving — "the chat yanked me back" is
+    // the single most-read bug a chat client can ship. When they scroll up, we stop following
+    // and show a pill instead; it counts what arrived while they were away.
+    val atBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf true
+            lastVisible >= state.messages.lastIndex - 2
+        }
+    }
+    var unseenBelow by remember(channel.id) { mutableStateOf(0) }
+    val lastSeenSize = remember(channel.id) { mutableStateOf(0) }
+
     LaunchedEffect(state.messages.size, channel.id) {
-        if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
+        val previous = lastSeenSize.value
+        lastSeenSize.value = state.messages.size
+        when {
+            state.messages.isEmpty() -> Unit
+            atBottom -> {
+                listState.animateScrollToItem(state.messages.lastIndex)
+                unseenBelow = 0
+            }
+            state.messages.size > previous && previous != 0 -> {
+                unseenBelow += state.messages.size - previous
+            }
+        }
     }
 
-    // Opening a conversation puts the caret in the message box. Anything else means the first
-    // thing you do after clicking a chat is click again, and it also leaves Escape with
-    // nothing focused to travel down from.
-    LaunchedEffect(channel.id) { runCatching { composerFocus.requestFocus() } }
+    // Reset the counter on channel open so a fresh conversation never shows a stale count.
+    LaunchedEffect(channel.id) {
+        unseenBelow = 0
+        lastSeenSize.value = state.messages.size
+        runCatching { composerFocus.requestFocus() }
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -1023,6 +1153,18 @@ private fun Conversation(
                 )
             }
 
+            // In-channel search. A plain icon toggle rather than a persistent field: the
+            // header is narrow on phones, and search is an occasional action, not a mode
+            // anyone lives in — the field appears only when asked for.
+            IconButton(onClick = { searching = !searching }) {
+                Icon(
+                    Icons.Filled.Search,
+                    contentDescription = if (searching) "Close search" else "Search in conversation",
+                    tint = if (searching) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             other?.let { person ->
                 TextButton(onClick = {
                     if (person.blockedByViewer) state.unblockUser(person.id)
@@ -1032,19 +1174,88 @@ private fun Conversation(
                 }
             }
         }
+
+        // The search strip, directly under the header when open. Debounced inside
+        // AppState.searchChannel's caller below — see the LaunchedEffect.
+        if (searching) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search this conversation") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                TextButton(
+                    onClick = { searchQuery = "" },
+                    enabled = searchQuery.isNotBlank(),
+                ) { Text("Clear") }
+            }
+            searchResults?.let { results ->
+                Text(
+                    if (results.isEmpty()) "No matches in this channel"
+                    else "${results.size} ${if (results.size == 1) "match" else "matches"}, newest first",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 4.dp),
+                )
+            }
+            HorizontalDivider()
+        }
+
         HorizontalDivider()
 
         Box(Modifier.weight(1f)) {
-            MessageList(
-                messages = state.messages,
-                selfId = state.currentUser?.id,
-                layout = if (state.chatLayout == "COMPACT") ChatLayout.COMPACT else ChatLayout.BUBBLES,
-                listState = listState,
-                resolver = resolver,
-                onReact = { messageId, emoji -> state.toggleReaction(messageId, emoji) },
-                onMessageLongPress = { message -> pickerTarget = message.id },
-                modifier = Modifier.fillMaxSize(),
-            )
+            if (state.loadingChannel && state.messages.isEmpty()) {
+                // Placeholder rows, only ever during the first page of a channel — never a
+                // shimmer, never while scrolling. Six static rows the reader can ignore at a
+                // glance, which is the whole point: a skeleton should say "something is coming"
+                // and get out of the way, not pretend to be content.
+                SkeletonMessages()
+            } else {
+                MessageList(
+                    messages = state.messages,
+                    selfId = state.currentUser?.id,
+                    layout = if (state.chatLayout == "COMPACT") ChatLayout.COMPACT else ChatLayout.BUBBLES,
+                    listState = listState,
+                    resolver = resolver,
+                    onReact = { messageId, emoji -> state.toggleReaction(messageId, emoji) },
+                    onMessageLongPress = { message -> pickerTarget = message.id },
+                    modifier = Modifier.fillMaxSize(),
+                    isPending = { state.isPending(it) },
+                    isFailed = { state.isFailedSend(it) },
+                    onRetry = { message ->
+                        // The snackbar owns the retry prompt; tapping a failed message is a
+                        // shortcut to the same place.
+                        state.retryFailed(message)
+                    },
+                )
+            }
+
+            // The way back to the present. Only meaningful while history is open — at the
+            // bottom the pill is the thing it would jump to, so it hides there.
+            if (unseenBelow > 0 && !atBottom) {
+                JumpToPresentPill(
+                    count = unseenBelow,
+                    onClick = {
+                        scope.launch {
+                            if (state.messages.isNotEmpty()) {
+                                listState.animateScrollToItem(state.messages.lastIndex)
+                            }
+                            unseenBelow = 0
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 8.dp),
+                )
+            }
         }
 
         state.uploadProgress?.let { progress ->
@@ -1056,14 +1267,9 @@ private fun Conversation(
 
         TypingIndicator(state.typingUsers.values.toList())
 
-        state.error?.let {
-            Text(
-                it,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(horizontal = 20.dp),
-            )
-        }
+        // Transient failures surface through the snackbar host (App.kt), not inline text —
+        // an error that parks itself above the composer reads as furniture, and "Reconnecting"
+        // would sit there after the reconnect already succeeded.
 
         HorizontalDivider()
 
@@ -1184,6 +1390,7 @@ private fun Conversation(
                     // Not a Popup: the sheet sits inline above the composer and must not steal
                     // the composer's focus, which is also why Escape reaches it through the
                     // back dispatcher (registered above) rather than a key handler here.
+                    val targetMessage = state.messages.firstOrNull { it.id == pickerTarget }
                     ReactionSheet(
                         recents = recents,
                         onPick = { emoji ->
@@ -1194,6 +1401,24 @@ private fun Conversation(
                         },
                         onDismiss = { pickerTarget = null },
                         modifier = Modifier.animateEntrance(),
+                        actions = targetMessage?.let { message ->
+                            MessageSheetActions(
+                                canEdit = message.author.id == state.currentUser?.id,
+                                pinned = state.pinnedIds.contains(message.id),
+                                onEdit = {
+                                    pickerTarget = null
+                                    editingMessage = message
+                                },
+                                onDelete = {
+                                    pickerTarget = null
+                                    state.deleteMessage(message.id)
+                                },
+                                onTogglePin = {
+                                    pickerTarget = null
+                                    state.togglePin(message.id)
+                                },
+                            )
+                        },
                     )
                 }
 
@@ -1227,7 +1452,17 @@ private fun Conversation(
                                 // Throttled inside AppState — one mutation per 3s, not per keystroke.
                                 if (it.isNotBlank()) state.onTyping()
                             },
-                            placeholder = { Text("Message  ·  @ to mention · Shift+Enter for a new line") },
+                            label = {
+                                // The label is the only editing affordance inside the field
+                                // itself: it says what Enter will do, which changes.
+                                if (editingMessage != null) Text("Editing message")
+                            },
+                            placeholder = {
+                                Text(
+                                    "Message  ·  @ to mention · Shift+Enter for a new line",
+                                    color = LocalSingularColors.current.textFaint,
+                                )
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .focusRequester(composerFocus)
@@ -1260,11 +1495,33 @@ private fun Conversation(
                                         }
                                         open && isEnter -> { accept(candidates[active]); true }
 
+                                        // Abandoning an edit: Esc with the popup closed.
+                                        // Distinct from the popup branch above by `open`, and
+                                        // deliberately before the !isEnter fallthrough so it
+                                        // cannot leak into the send path.
+                                        editingMessage != null && event.key == Key.Escape -> {
+                                            editingMessage = null
+                                            draft = ""
+                                            true
+                                        }
+
                                         !isEnter -> false
                                         // Shift+Enter falls through so the field inserts the newline itself.
                                         event.isShiftPressed -> false
                                         else -> {
-                                            if (draft.isNotBlank()) { state.send(draft); draft = "" }
+                                            val editing = editingMessage
+                                            if (editing != null) {
+                                                // Editing replaces the body; an empty edit is
+                                                // a cancel, not "wipe the message" — that is
+                                                // what Delete is for.
+                                                if (draft.isNotBlank()) {
+                                                    state.editMessage(editing.id, draft)
+                                                }
+                                                editingMessage = null
+                                                draft = ""
+                                            } else if (draft.isNotBlank()) {
+                                                state.send(draft); draft = ""
+                                            }
                                             true
                                         }
                                     }
@@ -1277,9 +1534,38 @@ private fun Conversation(
                             maxLines = 6,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                             keyboardActions = KeyboardActions(onSend = {
-                                if (draft.isNotBlank()) { state.send(draft); draft = "" }
+                                val editing = editingMessage
+                                if (editing != null) {
+                                    if (draft.isNotBlank()) state.editMessage(editing.id, draft)
+                                    editingMessage = null
+                                    draft = ""
+                                } else if (draft.isNotBlank()) {
+                                    state.send(draft); draft = ""
+                                }
                             }),
                         )
+
+                        // The editing banner: the field label is subtle by design, so this row
+                        // is what actually announces the mode change — especially on mobile,
+                        // where there is no Esc key and Cancel needs a visible target.
+                        if (editingMessage != null) {
+                            Row(
+                                Modifier.padding(top = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "Editing message",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                                Spacer(Modifier.weight(1f))
+                                TextButton(onClick = {
+                                    editingMessage = null
+                                    draft = ""
+                                    runCatching { composerFocus.requestFocus() }
+                                }) { Text("Cancel") }
+                            }
+                        }
 
                         // The autocomplete list, anchored under the field. Shown only while a
                         // token is active and something matches.
@@ -1390,6 +1676,10 @@ private fun Conversation(
  * The reaction sheet: the quick one-tap set plus the full picker behind "More", shown when a
  * message is long-pressed. Eight defaults cover nearly every reaction anyone sends; the grid
  * is there for the other ones.
+ *
+ * The action row (edit/delete/pin) sits *under* the reaction strip rather than replacing it:
+ * reacting is the most common long-press intent by far, and burying it behind a second sheet
+ * would tax the many for the sake of the few.
  */
 @Composable
 private fun ReactionSheet(
@@ -1397,6 +1687,8 @@ private fun ReactionSheet(
     onPick: (String) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Extra row actions for the long-pressed message. See [MessageSheetActions]. */
+    actions: MessageSheetActions? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -1418,28 +1710,68 @@ private fun ReactionSheet(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         modifier = modifier.padding(horizontal = 12.dp, vertical = 4.dp).fillMaxWidth(),
     ) {
-        Row(
-            Modifier.padding(10.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            val font = emojiFontFamily()
-            QUICK_REACTIONS.forEach { emoji ->
-                Text(
-                    emoji,
-                    fontFamily = font,
-                    fontSize = 24.sp,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { onPick(emoji) }
-                        .padding(6.dp),
-                )
+        Column {
+            Row(
+                Modifier.padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val font = emojiFontFamily()
+                QUICK_REACTIONS.forEach { emoji ->
+                    Text(
+                        emoji,
+                        fontFamily = font,
+                        fontSize = 24.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onPick(emoji) }
+                            .padding(6.dp),
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = { expanded = true }) { Text("More") }
             }
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = { expanded = true }) { Text("More") }
+
+            actions?.let { row ->
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                Row(
+                    Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Edit: authors only. The server enforces it too, but hiding the affordance
+                    // for other people's messages is what stops a user from composing an edit
+                    // only to have it bounce.
+                    if (row.canEdit) {
+                        TextButton(onClick = { row.onEdit() }) { Text("Edit") }
+                    }
+                    // Delete is offered on everything: in a guild, whether you may delete
+                    // someone else's message is a MANAGE_MESSAGES question the server answers;
+                    // in a DM it is author-only there too. Offering it and getting a clear
+                    // refusal beats hiding it and leaving moderators without the gesture.
+                    TextButton(onClick = { row.onDelete() }) { Text("Delete") }
+                    TextButton(onClick = { row.onTogglePin() }) {
+                        Text(if (row.pinned) "Unpin" else "Pin")
+                    }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                }
+            }
         }
     }
 }
+
+/**
+ * The non-reaction actions for the long-pressed message. A class rather than a pile of
+ * nullable lambdas so a missing action is a missing row item, not a dead button.
+ */
+class MessageSheetActions(
+    val canEdit: Boolean,
+    val pinned: Boolean,
+    val onEdit: () -> Unit,
+    val onDelete: () -> Unit,
+    val onTogglePin: () -> Unit,
+)
 
 /**
  * "Orbit is typing" with three pulsing dots.
@@ -1462,6 +1794,9 @@ private fun TypingIndicator(users: List<UserDto>) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (users.isEmpty()) return@Row
+
+        // The dots pulse only when motion is on; reduced motion shows a steady label.
+        if (LocalReducedMotion.current) return@Row
 
         val transition = rememberInfiniteTransition(label = "typing")
         repeat(3) { index ->
@@ -1491,20 +1826,123 @@ private fun TypingIndicator(users: List<UserDto>) {
     }
 }
 
+/**
+ * Placeholder rows shown while a channel's first page loads.
+ *
+ * Static, by design: a shimmer (animated gradient sweep) is one of the few animation patterns
+ * that costs a full-screen redraw per frame, and a load spinner that cheap is one nobody asked
+ * for. Six quiet rows in the layout the real messages will take is enough to say "wait one".
+ */
 @Composable
-private fun EmptyState(state: AppState) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("No conversation open", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.padding(4.dp))
+private fun SkeletonMessages() {
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        repeat(6) { index ->
+            val mine = index % 3 == 1
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(if (mine) 0.5f + (index % 2) * 0.1f else 0.4f + (index % 3) * 0.08f)
+                        .height(34.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The sidebar's drag handle: 10dp wide, visually a 1dp hairline, cursor changes on hover.
+ *
+ * The width is persisted per device (`AppState.sidebarWidthDp`) — a 13-inch laptop and a
+ * 34-inch monitor want different answers, and that's exactly why this isn't a synced setting.
+ */
+@Composable
+private fun ResizableDivider(widthDp: Int, onResize: (Int) -> Unit) {
+    val density = LocalDensity.current
+    val interaction = remember { MutableInteractionSource() }
+    val hover by interaction.collectIsHoveredAsState()
+
+    Box(
+        Modifier
+            .width(10.dp)
+            .fillMaxHeight()
+            .hoverable(interaction)
+            .pointerInput(widthDp) {
+                var startWidth = widthDp
+                var accumulated = 0f
+                detectDragGestures(
+                    onDragStart = { startWidth = widthDp; accumulated = 0f },
+                ) { change, dragAmount ->
+                    change.consume()
+                    accumulated += dragAmount.x
+                    // Deltas arrive in pixels; the width is in dp. The density is read at
+                    // composition time, which is the frame the pointer is in.
+                    onResize(startWidth + (accumulated / density.density).toInt())
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .width(if (hover) 2.dp else 1.dp)
+                .fillMaxHeight()
+                .background(
+                    if (hover) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outline
+                )
+        )
+    }
+}
+
+/**
+ * The "N new" pill that floats above the composer while history is open.
+ *
+ * Appears only when there's something to jump back to, which is also why it doesn't steal
+ * attention at the bottom of a live chat — there it would just be noise.
+ */
+@Composable
+private fun JumpToPresentPill(count: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(999.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        tonalElevation = 3.dp,
+        shadowElevation = 4.dp,
+        modifier = modifier.animateEntrance(),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Filled.ArrowDownward,
+                contentDescription = null,
+                modifier = Modifier.size(15.dp),
+            )
+            Spacer(Modifier.width(6.dp))
             Text(
-                // Says what to do *here*, which depends on where you are — telling someone
-                // in a server to enter a handle was advice for a different screen.
-                if (state.selectedGuild != null) "Pick a channel on the left."
-                else "Open the Friends tab to add someone by handle.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (count == 1) "1 new message" else "$count new messages",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
             )
         }
     }
+}
+
+@Composable
+private fun HomeEmptyState(state: AppState) {
+    EmptyState(
+        icon = Icons.AutoMirrored.Filled.Chat,
+        title = "No conversation open",
+        // Says what to do *here*, which depends on where you are — telling someone in a server
+        // to enter a handle was advice for a different screen.
+        hint = if (state.selectedGuild != null) "Pick a channel on the left."
+               else "Open the Friends tab to add someone by handle.",
+        modifier = Modifier.fillMaxSize(),
+    )
 }

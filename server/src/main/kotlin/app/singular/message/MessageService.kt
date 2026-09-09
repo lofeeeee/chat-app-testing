@@ -29,11 +29,13 @@ class MessageService(
     private val channels: ChannelRepository,
     private val channelService: ChannelService,
     private val events: MessageEvents,
+    private val updateEvents: MessageUpdateEvents,
     private val social: SocialRepository,
     private val mentionParser: MentionParser,
     private val mentions: MentionRepository,
     private val reactions: ReactionRepository,
     private val reactionEvents: ReactionEvents,
+    private val pins: PinRepository,
     private val guilds: app.singular.guild.GuildRepository,
     private val guildService: app.singular.guild.GuildService,
     private val media: app.singular.media.MediaService,
@@ -223,6 +225,151 @@ class MessageService(
     }
 
     /**
+     * Edits are author-only, always. There is no moderation story for editing someone else's
+     * words — a moderator "fixing" a message is indistinguishable from putting words in
+     * someone's mouth. Deletion is where moderation lives (and needs MANAGE_MESSAGES).
+     */
+    @Transactional
+    fun edit(messageId: Long, authorId: Long, content: String): Message {
+        val existing = messages.findById(messageId, Snowflake.timestampOf(messageId))
+            ?: throw NotFound("Message")
+        if (existing.authorId != authorId) {
+            throw Forbidden("that message")
+        }
+        if (existing.locationLat != null) {
+            throw InvalidInput("Location messages can't be edited.")
+        }
+
+        val body = content.trim()
+        if (body.isEmpty() && existing.replyToId == null) {
+            // An edit must leave a message the reader can render; editing down to nothing
+            // is what the delete button is for.
+            throw InvalidInput("Message can't be empty.")
+        }
+        if (body.length > props.limits.messageMaxLength) {
+            throw InvalidInput("Messages are limited to ${props.limits.messageMaxLength} characters.")
+        }
+
+        val editedAt = Instant.now()
+        if (!messages.edit(messageId, Snowflake.timestampOf(messageId), body, editedAt)) {
+            throw NotFound("Message")
+        }
+
+        val updated = existing.copy(content = body, editedAt = editedAt)
+        // Mentions are re-parsed because a mention added by an edit is as real as one that
+        // was there from the start. The inbox row for a removed mention lingers until reaped
+        // — acceptable, since the inbox re-checks visibility and existence on every read.
+        val parsed = mentionParser.parse(body)
+        if (parsed.isNotEmpty()) {
+            val guildId = channels.findById(existing.channelId)?.guildId
+            mentions.record(messageId, existing.channelId, guildId, existing.createdAt, parsed)
+        }
+
+        afterCommit { updateEvents.publish(updated, deleted = false) }
+        return updated
+    }
+
+    /**
+     * Author or, in a guild channel, anyone with MANAGE_MESSAGES. In a DM there is no
+     * permission model, so it stays author-only — the other party deleting your messages
+     * out of your own history is not a moderation power anyone should have over a DM.
+     */
+    @Transactional
+    fun delete(messageId: Long, actorId: Long): Boolean {
+        val message = messages.findById(messageId, Snowflake.timestampOf(messageId))
+            ?: throw NotFound("Message")
+        val channel = channelService.requireVisible(message.channelId, actorId)
+
+        if (message.authorId != actorId) {
+            if (channel.guildId != null) {
+                guildService.requireInChannel(
+                    message.channelId, channel.guildId, actorId, app.singular.guild.Permission.MANAGE_MESSAGES,
+                )
+            } else {
+                throw Forbidden("that message")
+            }
+        }
+
+        if (!messages.softDelete(messageId, Snowflake.timestampOf(messageId), Instant.now())) {
+            // Lost a race with a concurrent delete. Idempotent outcome: it is gone either way.
+            return true
+        }
+        // The tombstone still needs to reach open clients so a rendered message disappears.
+        afterCommit { updateEvents.publish(message, deleted = true) }
+        return true
+    }
+
+    /** Pins are gated by PIN_MESSAGES in guild channels; anyone in a DM/group can pin. */
+    @Transactional
+    fun pin(messageId: Long, actorId: Long): Boolean {
+        val message = messages.findById(messageId, Snowflake.timestampOf(messageId))
+            ?: throw NotFound("Message")
+        val channel = channelService.requireVisible(message.channelId, actorId)
+        if (channel.guildId != null) {
+            guildService.requireInChannel(
+                message.channelId, channel.guildId, actorId, app.singular.guild.Permission.PIN_MESSAGES,
+            )
+        }
+        pins.pin(message.channelId, messageId, actorId)
+        return true
+    }
+
+    @Transactional
+    fun unpin(messageId: Long, actorId: Long): Boolean {
+        val message = messages.findById(messageId, Snowflake.timestampOf(messageId))
+            ?: throw NotFound("Message")
+        val channel = channelService.requireVisible(message.channelId, actorId)
+        if (channel.guildId != null) {
+            guildService.requireInChannel(
+                message.channelId, channel.guildId, actorId, app.singular.guild.Permission.PIN_MESSAGES,
+            )
+        }
+        return pins.unpin(message.channelId, messageId)
+    }
+
+    fun pinnedIn(channelId: Long, userId: Long): List<Message> {
+        channelService.requireVisible(channelId, userId)
+        return pins.pinnedIn(channelId).values.toList()
+    }
+
+    /**
+     * Full-text search in a channel the viewer can read. The window is a fixed lookback, not
+     * all of history — the client surfaces "search older" only if anyone ever wants it, and
+     * the bounded window keeps the partition plan tight.
+     */
+    fun search(channelId: Long, userId: Long, query: String, limit: Int?): List<Message> {
+        channelService.requireVisible(channelId, userId)
+        val clean = query.trim()
+        if (clean.isEmpty()) return emptyList()
+        val size = (limit ?: 25).coerceIn(1, 100)
+        val window = Instant.now().minus(SEARCH_LOOKBACK)..Instant.now().plusSeconds(1)
+        return messages.search(channelId, clean, size, window.start, window.endInclusive)
+    }
+
+    /** Unread count for a channel the viewer can read, past their stored cursor. */
+    fun unreadCount(channelId: Long, userId: Long): Int {
+        channelService.requireVisible(channelId, userId)
+        val cursor = channels.lastReadFor(channelId, userId) ?: return 0
+        if (cursor >= (channels.findById(channelId)?.lastMessageId ?: cursor)) return 0
+        val window = Snowflake.timestampOf(cursor)..Instant.now().plusSeconds(1)
+        return messages.countSince(channelId, cursor, window.start, window.endInclusive)
+    }
+
+    /**
+     * Batch unread counts for the whole DM sidebar, one query. Guild channels don't participate
+     * (no member rows, no cursor) — see [MessageRepository.unreadCountsFor].
+     */
+    fun unreadCountsFor(userId: Long): Map<Long, Int> {
+        val window = Instant.now().minus(UNREAD_LOOKBACK)..Instant.now().plusSeconds(1)
+        return messages.unreadCountsFor(userId, window.start, window.endInclusive)
+    }
+
+    fun subscribeUpdates(channelId: Long, userId: Long): Flux<MessageUpdate> {
+        channelService.requireVisible(channelId, userId)
+        return updateEvents.subscribe(channelId)
+    }
+
+    /**
      * Adds a reaction. Permission-gated in guild channels through the same channel-scoped
      * engine as posting — `ADD_REACTIONS` is a real flag in the bitfield, default-granted to
      * @everyone, and a channel overwrite denying it must hold here too. DMs have no permission
@@ -341,6 +488,12 @@ class MessageService(
          * longer than a quarter and users who scroll straight through.
          */
         val PARTITION_LOOKBACK: java.time.Duration = java.time.Duration.ofDays(120)
+
+        /** How far back channel search reaches. Same reasoning as PARTITION_LOOKBACK. */
+        val SEARCH_LOOKBACK: java.time.Duration = java.time.Duration.ofDays(365)
+
+        /** Unread counting window. A cursor older than this counts as "everything unread is stale" — the count starts from the window floor rather than scanning years. */
+        val UNREAD_LOOKBACK: java.time.Duration = java.time.Duration.ofDays(120)
 
         /**
          * Cap on a single reaction's stored length. A ZWJ sequence (family, profession) or a

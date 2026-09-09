@@ -15,6 +15,7 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.security.KeyPair
+import java.security.PrivateKey
 import java.security.Signature
 import java.security.interfaces.RSAPrivateKey
 import java.time.Instant
@@ -51,7 +52,7 @@ class FcmTransport(
 
     private class CachedToken(val bearer: String, val expiresAt: Instant)
 
-    private class ServiceAccount(val email: String, val keyId: String, val keyPair: KeyPair)
+    private class ServiceAccount(val email: String, val keyId: String, val privateKey: PrivateKey)
 
     override fun send(token: String, message: PushMessage): Boolean {
         val auth = bearerToken() ?: run {
@@ -123,7 +124,7 @@ class FcmTransport(
                 """"exp":${now + TOKEN_TTL_SECONDS},"iat":$now}"""
         )
         val signer = Signature.getInstance("RS256")
-        signer.initSign(account.keyPair.private as RSAPrivateKey)
+        signer.initSign(account.privateKey as RSAPrivateKey)
         signer.update("$header.$claims".toByteArray())
         val signature = b64url(signer.sign())
         val assertion = "$header.$claims.$signature"
@@ -169,7 +170,10 @@ class FcmTransport(
                 is PrivateKeyInfo -> obj
                 else -> error("Unexpected PEM object: ${obj::class.simpleName}")
             }
-            return ServiceAccount(email, keyId, JcaPEMKeyConverter().getKeyPair(info))
+            // A PKCS#8 "BEGIN PRIVATE KEY" block carries only the private half; getKeyPair
+            // demands a PEMKeyPair. The private key alone works for both PEM shapes, and
+            // RS256 signing never touches the public half anyway.
+            return ServiceAccount(email, keyId, JcaPEMKeyConverter().getPrivateKey(info))
         }
     }
 

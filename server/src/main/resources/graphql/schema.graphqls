@@ -160,6 +160,23 @@ type Query {
   channels: [Channel!]!
   channel(id: Snowflake!): Channel
   messages(channelId: Snowflake!, before: Snowflake, limit: Int = 50): MessagePage!
+  "Messages in a channel matching the text, newest first. Bounded to the last year."
+  searchMessages(channelId: Snowflake!, query: String!, limit: Int = 25): [Message!]!
+  "Pins for a channel, newest pin first."
+  pinnedMessages(channelId: Snowflake!): [Message!]!
+  """
+  Unread messages past your read cursor in one channel. Guild channels have no cursor
+  (no membership rows), so this is DM/group DM only — guild unread is client-side.
+  """
+  unreadCount(channelId: Snowflake!): Int!
+  "Batch variant for the sidebar: channel id -> unread count, DM/group channels only."
+  unreadCounts: [ChannelUnread!]!
+}
+
+"One sidebar row's worth of unread state."
+type ChannelUnread {
+  channelId: Snowflake!
+  count: Int!
 }
 
 type Mutation {
@@ -184,6 +201,18 @@ type Mutation {
   "Idempotent per (message, you, emoji) — re-adding the same emoji is a no-op."
   addReaction(messageId: Snowflake!, emoji: String!): Message!
   removeReaction(messageId: Snowflake!, emoji: String!): Message!
+
+  "Author only, always — nobody can edit someone else's words. Sets `editedAt`."
+  editMessage(messageId: Snowflake!, content: String!): Message!
+  """
+  Author, or anyone with MANAGE_MESSAGES in a guild channel. Soft-deletes: the row is
+  tombstoned and every read path drops it, but mention rows keep their reference intact.
+  """
+  deleteMessage(messageId: Snowflake!): Boolean!
+
+  "PIN_MESSAGES in guild channels; anyone in a DM or group DM."
+  pinMessage(messageId: Snowflake!): Boolean!
+  unpinMessage(messageId: Snowflake!): Boolean!
 }
 
 """
@@ -214,6 +243,21 @@ type Subscription {
   notifications: Message!
   "Live reaction snapshots for a channel. Recompute your own reacted-state locally."
   reactionUpdated(channelId: Snowflake!): ReactionUpdate!
+  """
+  Corrections to already-delivered messages: edits and deletions for a channel you can
+  read. Apply on top of `messageCreated` — the timeline is a cache, this is the
+  invalidation stream for it.
+  """
+  messageUpdated(channelId: Snowflake!): MessageUpdateEvent!
+}
+
+"""
+An edit or deletion of a message already on the wire. `deleted` true means the client
+should drop the message from its timeline; false means replace content with `message`.
+"""
+type MessageUpdateEvent {
+  message: Message!
+  deleted: Boolean!
 }
 
 # ---------------------------------------------------------------------------

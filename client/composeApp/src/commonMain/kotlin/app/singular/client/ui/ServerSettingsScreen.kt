@@ -146,14 +146,7 @@ fun ServerSettingsScreen(
                 ServerSettingsSection.INVITES -> InvitesSection(state, guild, can)
                 ServerSettingsSection.MY_PROFILE -> MyProfileSection(state, guild, can)
             }
-
-            state.error?.let {
-                Text(
-                    it,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+            // Errors surface via the snackbar host (App.kt) — see the note in SettingsScreen.
         }
     }
 }

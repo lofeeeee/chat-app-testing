@@ -281,7 +281,15 @@ private fun TextBand(
             .offset(y = frameHeight * overlay.y.coerceIn(0f, 1f))
             .fillMaxWidth()
             .padding(horizontal = 20.dp)
-            .then(if (editable) Modifier.gestureLayer(onTap, onDragY, onTransform) else Modifier)
+            .then(
+                if (editable) {
+                    Modifier.gestureLayer(
+                        onTap = onTap,
+                        onDragY = onDragY,
+                        onTransform = onTransform,
+                    )
+                } else Modifier
+            )
             .rotate(overlay.rotation)
             .scale(overlay.scale.coerceIn(0.3f, 4f)),
         contentAlignment = when (overlay.align) {
@@ -374,8 +382,6 @@ private fun BoxScope.SelectionRing() {
                 shape = RoundedCornerShape(6.dp),
             )
     )
-}
-
 }
 
 /**

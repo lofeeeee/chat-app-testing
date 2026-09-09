@@ -112,6 +112,8 @@ fun QrLoginPanel(
         when (qr.phase) {
             QrPhase.WAITING -> {
                 // Drains left to right over the rotation interval, then snaps back on the swap.
+                // The countdown is information, so it still animates under reduced motion —
+                // but linearly, without the eased ease-in-and-out.
                 val progress by animateFloatAsState(
                     targetValue = qr.secondsUntilRotate.toFloat() / rotateSeconds,
                     animationSpec = tween(durationMillis = 900),

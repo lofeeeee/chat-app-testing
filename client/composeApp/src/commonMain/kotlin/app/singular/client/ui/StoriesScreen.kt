@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AmpStories
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -133,18 +134,11 @@ fun StoriesScreen(state: AppState, onCompose: () -> Unit, onClose: () -> Unit) {
                 item {
                     Spacer(Modifier.height(28.dp))
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                "No recent updates",
-                                style = MaterialTheme.typography.titleSmall,
-                            )
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                "Stories from people you talk to show up here for 24 hours.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+                        EmptyState(
+                            icon = Icons.Filled.AmpStories,
+                            title = "No recent updates",
+                            hint = "Stories from people you talk to show up here for 24 hours.",
+                        )
                     }
                 }
             }

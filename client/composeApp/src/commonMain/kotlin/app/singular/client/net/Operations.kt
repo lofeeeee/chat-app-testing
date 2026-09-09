@@ -371,6 +371,75 @@ object Operations {
         }
     """
 
+    // -- Edit, delete, pin, search, unread -------------------------------------
+
+    val EDIT_MESSAGE = """
+        $USER_FIELDS
+        $ATTACHMENT_FIELDS
+        $MESSAGE_FIELDS
+        mutation EditMessage(${'$'}messageId: Snowflake!, ${'$'}content: String!) {
+            editMessage(messageId: ${'$'}messageId, content: ${'$'}content) { ...MessageFields }
+        }
+    """
+
+    val DELETE_MESSAGE = """
+        mutation DeleteMessage(${'$'}messageId: Snowflake!) { deleteMessage(messageId: ${'$'}messageId) }
+    """
+
+    val PIN_MESSAGE = """
+        mutation PinMessage(${'$'}messageId: Snowflake!) { pinMessage(messageId: ${'$'}messageId) }
+    """
+
+    val UNPIN_MESSAGE = """
+        mutation UnpinMessage(${'$'}messageId: Snowflake!) { unpinMessage(messageId: ${'$'}messageId) }
+    """
+
+    val PINNED_MESSAGES = """
+        $USER_FIELDS
+        $ATTACHMENT_FIELDS
+        $MESSAGE_FIELDS
+        query PinnedMessages(${'$'}channelId: Snowflake!) {
+            pinnedMessages(channelId: ${'$'}channelId) { ...MessageFields }
+        }
+    """
+
+    val SEARCH_MESSAGES = """
+        $USER_FIELDS
+        $ATTACHMENT_FIELDS
+        $MESSAGE_FIELDS
+        query SearchMessages(${'$'}channelId: Snowflake!, ${'$'}query: String!, ${'$'}limit: Int) {
+            searchMessages(channelId: ${'$'}channelId, query: ${'$'}query, limit: ${'$'}limit) {
+                ...MessageFields
+            }
+        }
+    """
+
+    val UNREAD_COUNTS = """
+        query UnreadCounts { unreadCounts { channelId count } }
+    """
+
+    val MARK_READ = """
+        mutation MarkRead(${'$'}channelId: Snowflake!, ${'$'}messageId: Snowflake!) {
+            markRead(channelId: ${'$'}channelId, messageId: ${'$'}messageId)
+        }
+    """
+
+    /**
+     * The correction stream for the open channel: edits and deletions. Applied on top of the
+     * messages already rendered — the timeline is a cache, this is its invalidation feed.
+     */
+    val MESSAGE_UPDATED = """
+        $USER_FIELDS
+        $ATTACHMENT_FIELDS
+        $MESSAGE_FIELDS
+        subscription OnMessageUpdated(${'$'}channelId: Snowflake!) {
+            messageUpdated(channelId: ${'$'}channelId) {
+                deleted
+                message { ...MessageFields }
+            }
+        }
+    """
+
     val SET_CUSTOM_STATUS = """
         mutation SetCustomStatus(${'$'}text: String, ${'$'}emoji: String) {
             setCustomStatus(text: ${'$'}text, emoji: ${'$'}emoji) { userId status customText customEmoji }

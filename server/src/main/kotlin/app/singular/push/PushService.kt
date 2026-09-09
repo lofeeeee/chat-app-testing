@@ -5,6 +5,7 @@ import app.singular.social.SocialRepository
 import org.slf4j.LoggerFactory
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
+import org.springframework.stereotype.Service
 import java.util.UUID
 
 enum class PushPlatform(val code: Short) {

@@ -160,6 +160,13 @@ data class MessageDto(
     val reactions: List<ReactionDto> = emptyList(),
 )
 
+/** A correction from `messageUpdated`: replace the message, or drop it when [deleted]. */
+@Serializable
+data class MessageUpdateEventDto(
+    val message: MessageDto,
+    val deleted: Boolean,
+)
+
 @Serializable
 data class MentionDto(
     val type: String,
@@ -287,6 +294,23 @@ data class GraphQlResponse<T>(
 @Serializable data class UserByHandleData(val userByHandle: UserDto? = null)
 @Serializable data class MessageCreatedData(@SerialName("messageCreated") val message: MessageDto)
 @Serializable data class NotificationsData(@SerialName("notifications") val message: MessageDto)
+@Serializable data class MessageUpdatedData(@SerialName("messageUpdated") val event: MessageUpdateEventDto)
+@Serializable data class EditMessageData(@SerialName("editMessage") val message: MessageDto)
+@Serializable data class DeleteMessageData(@SerialName("deleteMessage") val ok: Boolean)
+@Serializable data class PinMessageData(@SerialName("pinMessage") val ok: Boolean)
+@Serializable data class UnpinMessageData(@SerialName("unpinMessage") val ok: Boolean)
+@Serializable data class PinnedMessagesData(@SerialName("pinnedMessages") val messages: List<MessageDto>)
+@Serializable data class SearchMessagesData(@SerialName("searchMessages") val messages: List<MessageDto>)
+@Serializable data class UnreadCountData(@SerialName("unreadCount") val count: Int)
+
+@Serializable
+data class ChannelUnreadDto(
+    val channelId: String,
+    val count: Int,
+)
+
+@Serializable data class UnreadCountsData(@SerialName("unreadCounts") val counts: List<ChannelUnreadDto>)
+@Serializable data class MarkReadData(@SerialName("markRead") val ok: Boolean)
 @Serializable data class AddReactionData(@SerialName("addReaction") val message: MessageDto)
 @Serializable data class RemoveReactionData(@SerialName("removeReaction") val message: MessageDto)
 @Serializable data class ReactionUpdatedData(@SerialName("reactionUpdated") val update: ReactionUpdateDto)

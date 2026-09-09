@@ -4,6 +4,7 @@ import app.singular.domain.Message
 import app.singular.domain.User
 import app.singular.message.MessagePage
 import app.singular.ratelimit.RateLimiter
+import app.singular.message.MessageUpdate
 import app.singular.message.Mention
 import app.singular.message.MentionRepository
 import app.singular.message.MessageService
@@ -33,6 +34,9 @@ data class SendMessageInput(
     val nonce: String? = null,
     val attachmentIds: List<Long> = emptyList(),
 )
+
+/** One sidebar row's unread state — see the `ChannelUnread` GraphQL type. */
+data class ChannelUnread(val channelId: Long, val count: Int)
 
 @Controller
 class MessageController(
@@ -124,6 +128,59 @@ class MessageController(
     @MutationMapping
     fun removeReaction(@Argument messageId: Long, @Argument emoji: String, ctx: GraphQLContext): Message =
         messageService.removeReaction(messageId, ctx.requirePrincipal().userId, emoji)
+
+    @MutationMapping
+    fun editMessage(@Argument messageId: Long, @Argument content: String, ctx: GraphQLContext): Message {
+        val principal = ctx.requirePrincipal()
+        rateLimiter.acquireOrThrow("edit-message", principal.userId.toString())
+        return messageService.edit(messageId, principal.userId, content)
+    }
+
+    @MutationMapping
+    fun deleteMessage(@Argument messageId: Long, ctx: GraphQLContext): Boolean =
+        messageService.delete(messageId, ctx.requirePrincipal().userId)
+
+    @MutationMapping
+    fun pinMessage(@Argument messageId: Long, ctx: GraphQLContext): Boolean =
+        messageService.pin(messageId, ctx.requirePrincipal().userId)
+
+    @MutationMapping
+    fun unpinMessage(@Argument messageId: Long, ctx: GraphQLContext): Boolean =
+        messageService.unpin(messageId, ctx.requirePrincipal().userId)
+
+    @QueryMapping
+    fun pinnedMessages(@Argument channelId: Long, ctx: GraphQLContext): List<Message> =
+        messageService.pinnedIn(channelId, ctx.requirePrincipal().userId)
+
+    @QueryMapping
+    fun searchMessages(
+        @Argument channelId: Long,
+        @Argument query: String,
+        @Argument limit: Int?,
+        ctx: GraphQLContext,
+    ): List<Message> {
+        val principal = ctx.requirePrincipal()
+        rateLimiter.acquireOrThrow("search-messages", principal.userId.toString())
+        return messageService.search(channelId, principal.userId, query, limit)
+    }
+
+    @QueryMapping
+    fun unreadCount(@Argument channelId: Long, ctx: GraphQLContext): Int =
+        messageService.unreadCount(channelId, ctx.requirePrincipal().userId)
+
+    @QueryMapping
+    fun unreadCounts(ctx: GraphQLContext): List<ChannelUnread> =
+        messageService.unreadCountsFor(ctx.requirePrincipal().userId)
+            .map { ChannelUnread(channelId = it.key, count = it.value) }
+
+    /**
+     * The correction stream: edits and deletes for a channel you can read. A client renders
+     * `messageCreated` for the timeline and applies these on top — the same one-socket,
+     * per-channel model as reactions.
+     */
+    @SubscriptionMapping
+    fun messageUpdated(@Argument channelId: Long, ctx: GraphQLContext): Flux<MessageUpdate> =
+        messageService.subscribeUpdates(channelId, ctx.requirePrincipal().userId)
 
     /**
      * Live reaction counts for a channel, so every viewer's chips update as others react.

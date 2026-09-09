@@ -154,11 +154,9 @@ actual class AudioPlayer {
 
     @Volatile
     actual var isPlaying: Boolean = false
-        private set
 
     @Volatile
     actual var positionSeconds: Float = 0f
-        private set
 
     actual fun play(bytes: ByteArray, mimeType: String, onEnded: () -> Unit) {
         stop()

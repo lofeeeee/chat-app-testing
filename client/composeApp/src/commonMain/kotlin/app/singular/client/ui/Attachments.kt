@@ -3,6 +3,7 @@
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -95,7 +96,14 @@ private fun ImageAttachment(attachment: AttachmentDto, tint: Color) {
             .height(boxWidth * ratio.coerceIn(0.3f, 1.6f))
             .clip(MaterialTheme.shapes.small)
             .background(tint.copy(alpha = 0.10f))
-            .border(1.dp, tint.copy(alpha = 0.18f), MaterialTheme.shapes.small),
+            .border(1.dp, tint.copy(alpha = 0.18f), MaterialTheme.shapes.small)
+            // Tap to open the fullscreen viewer. This is the affordance every chat client
+            // has and this one lacked — see ImageViewerHost for why the viewer lives at the
+            // app root rather than inside the message.
+            .clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null,
+            ) { ImageViewerState.open(attachment) },
         contentAlignment = Alignment.Center,
     ) {
         if (source != null) {
@@ -243,16 +251,6 @@ private fun VoiceNote(attachment: AttachmentDto, tint: Color) {
                     strokeWidth = barWidth,
                 )
             }
-        }
-
-        Spacer(Modifier.width(10.dp))
-        Text(
-            formatDuration(attachment.durationMs),
-            style = MaterialTheme.typography.labelSmall,
-            color = tint.copy(alpha = 0.75f),
-        )
-    }
-}
         }
 
         Spacer(Modifier.width(10.dp))

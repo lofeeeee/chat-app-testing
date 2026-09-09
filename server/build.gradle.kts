@@ -30,6 +30,9 @@ dependencies {
     // Argon2id lives in spring-security-crypto but needs BouncyCastle's implementation.
     implementation("org.springframework.security:spring-security-crypto")
     implementation("org.bouncycastle:bcprov-jdk18on:1.80")
+    // PEM parsing (service-account JWT keys for FCM/APNs push). bcpkix, not bcprov, owns
+    // PEMParser/PEMKeyPair/JcaPEMKeyConverter — version-locked to bcprov above.
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.80")
 
     // S3-compatible object storage. The AWS SDK talks to MinIO with an endpoint override,
     // so the same code runs against self-hosted MinIO now and real S3 later with no rewrite.

@@ -15,7 +15,8 @@ data class PushOutboxRow(
     val body: String,
     val channelId: Long?,
     val messageId: Long?,
-    val attempts: Int,
+    /** A fresh row has never been attempted; the default keeps enqueue sites honest. */
+    val attempts: Int = 0,
 )
 
 /**
