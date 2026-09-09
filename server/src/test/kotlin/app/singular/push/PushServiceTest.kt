@@ -21,7 +21,10 @@ class PushServiceTest {
     private val tokens = mockk<PushTokenRepository>(relaxed = true)
     private val social = mockk<SocialRepository>()
     private val presence = mockk<PresenceService>()
-    private val snowflake = mockk<Snowflake>()
+
+    // A real instance rather than a mock: `shouldNotify` never calls it, and MockK can't mock
+    // a final class without its inline agent — a real one is one line and always works.
+    private val snowflake = Snowflake(app.singular.config.SingularProperties())
 
     private val service = PushService(
         tokens = tokens,

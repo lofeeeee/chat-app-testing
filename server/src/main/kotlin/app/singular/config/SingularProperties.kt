@@ -143,6 +143,9 @@ data class SingularProperties(
         val qrRotate: Policy = Policy(capacity = 30, refillPerMinute = 15.0),
         val qrClaim: Policy = Policy(capacity = 20, refillPerMinute = 10.0),
         val sendMessage: Policy = Policy(capacity = 30, refillPerMinute = 120.0),
+        /** Vandalism control rather than abuse control: edit/delete churn, same reasoning as send. */
+        val editMessage: Policy = Policy(capacity = 20, refillPerMinute = 30.0),
+        val searchMessages: Policy = Policy(capacity = 20, refillPerMinute = 30.0),
     ) {
         data class Policy(val capacity: Int, val refillPerMinute: Double)
 
@@ -154,6 +157,8 @@ data class SingularProperties(
             "qr-rotate" -> qrRotate
             "qr-claim" -> qrClaim
             "send-message" -> sendMessage
+            "edit-message" -> editMessage
+            "search-messages" -> searchMessages
             else -> throw IllegalStateException(
                 "No rate-limit policy for scope '$scope'. Add it to SingularProperties.RateLimit " +
                     "or fix the typo at the call site — failing closed here is deliberate."

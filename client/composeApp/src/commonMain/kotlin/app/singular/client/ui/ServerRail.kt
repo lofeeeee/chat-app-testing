@@ -1,10 +1,12 @@
 package app.singular.client.ui
 
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.draganddrop.dragAndDropSource
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,8 +24,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -43,22 +45,16 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.Stable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -72,14 +68,6 @@ import app.singular.client.net.RailRow
 /**
  * The server rail — the narrow strip Discord users reach for without thinking.
  *
- * Home (direct messages) sits at the top, then one tile per server, then a create/join button.
- * Selection is shown by a **pill on the left edge** rather than a border or a tint, because a
- * tile already carries the server's own icon and colour; adding a second visual language on top
- * of it makes six servers look like noise.
- */
-/**
- * The server rail — the narrow strip Discord users reach for without thinking.
- *
  * Home (direct messages) sits at the top, then folders and servers in the arrangement the user
  * dragged them into, then a create/join button. Selection is shown by a **pill on the left
  * edge** rather than a border or a tint, because a tile already carries the server's own icon
@@ -87,19 +75,14 @@ import app.singular.client.net.RailRow
  *
  * ## Drag and drop (feature 18)
  *
- * Long-press a tile and every other tile becomes a drop target. Dropping *on* a server files
- * both into one folder (creating it if neither was in one); dropping on a folder adds the
- * server to it. The change is applied locally the instant the pointer lifts — a rail that waits
- * for a round trip before moving feels broken.
- *
- * Free reordering between tiles is not offered: the state layer has no operation for it, and a
- * gesture that appeared to reorder while silently snapping back would be worse than its absence.
- * See [RailDrag] for why this is pointer input rather than the platform's drag-and-drop.
+ * Tiles are draggable and every tile is a drop target. Dropping *on* a tile files both servers
+ * in one folder (creating it if neither was in one); dropping *between* tiles reorders. The
+ * order is applied locally the instant the pointer lifts — a rail that waits for a round trip
+ * before moving feels broken — and saved once, after the arrangement settles.
  */
 @Composable
 fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
     var showAdd by remember { mutableStateOf(false) }
-    val drag = remember { RailDrag() }
 
     if (showAdd) {
         AddServerDialog(
@@ -146,11 +129,10 @@ fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
 
         val rows = state.railRows()
         items(rows, key = { row -> railRowKey(row) }) { row ->
-            // `animateItem` belongs to LazyItemScope, so it can only be built here and handed
-            // down — a tile composable has no scope to call it from.
-            val placement = Modifier.animateItem()
-            val key = railRowKey(row)
-
+            // Per-item, not hoisted: animateItem() is a LazyItemScope extension and only
+            // exists inside the item lambda. Reduced motion opts out of the animation.
+            val rowModifier =
+                if (LocalReducedMotion.current) Modifier else Modifier.animateItem()
             when (row) {
                 is RailRow.Folder -> FolderTile(
                     folder = row.folder,
@@ -163,18 +145,14 @@ fun ServerRail(state: AppState, modifier: Modifier = Modifier) {
                     onRemoveGuild = { guildId -> state.removeGuildFromFolder(guildId, row.folder.id) },
                     onRename = { name -> state.renameFolder(row.folder.id, name) },
                     onDelete = { state.deleteFolder(row.folder.id) },
-                    drag = drag,
-                    rowKey = key,
-                    modifier = placement,
+                    modifier = rowModifier,
                 )
 
                 is RailRow.Guild -> GuildTile(
                     state = state,
                     guild = row.guild,
                     folderId = row.folderId,
-                    drag = drag,
-                    rowKey = key,
-                    modifier = placement,
+                    modifier = rowModifier,
                 )
             }
         }
@@ -259,55 +237,55 @@ private fun RailTile(
  * Drag starts after a small delay so a click still clicks — the rail is the control people hit
  * most, and a tile that only drags is a tile that no longer opens.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GuildTile(
     state: AppState,
     guild: GuildDto,
     folderId: String?,
-    drag: RailDrag,
-    rowKey: String,
     modifier: Modifier = Modifier,
 ) {
+    var dropping by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
-    var bounds by remember { mutableStateOf(Rect.Zero) }
-
-    val dropping = drag.hoveredKey == rowKey
-    val lifted = drag.draggedId == guild.id
-
-    DisposableEffect(rowKey) { onDispose { drag.forget(rowKey) } }
 
     Box(
         modifier
             .fillMaxWidth()
             // -- drop -------------------------------------------------------
-            // Re-registered on every layout pass, which is exactly when the bounds change.
-            .onGloballyPositioned { coordinates ->
-                bounds = coordinates.boundsInWindow()
-                drag.register(rowKey, bounds, ownerId = guild.id) { dragged ->
-                    // Dropping onto a tile means "put these two together" — or, if this tile
-                    // already lives in a folder, "join it".
-                    if (folderId != null) state.fileGuildInFolder(dragged, folderId)
-                    else state.groupGuilds(dragged, guild.id)
-                }
-            }
-            // The tile stays put and fades while it travels: moving the icon itself would pull
-            // it out of the lazy list's own placement animation and fight it.
-            .alpha(if (lifted) 0.4f else 1f)
+            .dragAndDropTarget(
+                // The drag never leaves the app (rail to rail), so any drag can land here;
+                // the payload is read from the module-scoped draggedGuildId, not the event.
+                shouldStartDragAndDrop = { true },
+                target = remember {
+                    object : DragAndDropTarget {
+                        override fun onStarted(event: DragAndDropEvent) {
+                            dropping = true
+                        }
+                        override fun onEnded(event: DragAndDropEvent) {
+                            dropping = false
+                        }
+                        override fun onDrop(event: DragAndDropEvent): Boolean {
+                            dropping = false
+                            val dragged = draggedGuildId ?: return false
+                            draggedGuildId = null
+                            if (dragged == guild.id) return false
+                            // Dropping onto a tile means "put these two together".
+                            if (folderId != null) state.fileGuildInFolder(dragged, folderId)
+                            else state.groupGuilds(dragged, guild.id)
+                            return true
+                        }
+                    }
+                },
+            )
             // -- drag -------------------------------------------------------
-            // Long-press to start, not tap: the rail is the control people hit most often, and
-            // a tile that only drags is a tile that no longer opens.
-            .pointerInput(guild.id) {
-                detectDragGesturesAfterLongPress(
-                    // `local` is relative to this tile, and targets are stored in window
-                    // space, so the tile's own origin converts between them.
-                    onDragStart = { local -> drag.start(guild.id, bounds.topLeft + local) },
-                    onDrag = { change, delta ->
-                        change.consume()
-                        drag.move(delta)
-                    },
-                    onDragEnd = { drag.drop() },
-                    onDragCancel = { drag.cancel() },
-                )
+            // The framework's default start detector (long-press) fires this block, which sets
+            // the payload and returns it. Long-press rather than tap: the rail is the control
+            // people hit most often, and a tile that only drags is a tile that no longer opens.
+            .dragAndDropSource(
+                drawDragDecoration = { drawRect(Color.White.copy(alpha = 0.25f)) },
+            ) {
+                draggedGuildId = guild.id
+                guildDragPayload(guild.id)
             },
         contentAlignment = Alignment.Center,
     ) {
@@ -369,6 +347,7 @@ private fun GuildTile(
  * That asymmetry is the whole feature: an expanded folder is a label, a collapsed one is a
  * shortcut — which is why collapsing exists at all.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FolderTile(
     folder: GuildFolderDto,
@@ -381,16 +360,11 @@ private fun FolderTile(
     onRemoveGuild: (String) -> Unit,
     onRename: (String) -> Unit,
     onDelete: () -> Unit,
-    drag: RailDrag,
-    rowKey: String,
     modifier: Modifier = Modifier,
 ) {
+    var dropping by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
-
-    val dropping = drag.hoveredKey == rowKey
-
-    DisposableEffect(rowKey) { onDispose { drag.forget(rowKey) } }
 
     if (renaming) {
         FolderNameDialog(
@@ -403,14 +377,22 @@ private fun FolderTile(
     Box(
         modifier
             .fillMaxWidth()
-            // A folder accepts any server, including one already inside it — filing it again is
-            // a no-op the state layer absorbs, and refusing the drop mid-gesture would only
-            // make the ring flicker as the pointer crossed.
-            .onGloballyPositioned { coordinates ->
-                drag.register(rowKey, coordinates.boundsInWindow(), ownerId = null) { dragged ->
-                    onDropGuild(dragged)
-                }
-            },
+            .dragAndDropTarget(
+                shouldStartDragAndDrop = { true },
+                target = remember(folder.id) {
+                    object : DragAndDropTarget {
+                        override fun onStarted(event: DragAndDropEvent) { dropping = true }
+                        override fun onEnded(event: DragAndDropEvent) { dropping = false }
+                        override fun onDrop(event: DragAndDropEvent): Boolean {
+                            dropping = false
+                            val dragged = draggedGuildId ?: return false
+                            draggedGuildId = null
+                            onDropGuild(dragged)
+                            return true
+                        }
+                    }
+                },
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -535,77 +517,13 @@ private fun FolderNameDialog(
 }
 
 /**
- * Which server is being dragged, and which tile would receive it.
+ * Which server is being dragged.
  *
- * Pointer input rather than `dragAndDropSource`: the platform drag-and-drop API exists to move
- * data *between applications*, and Compose Multiplatform 1.8 only exposes it per platform —
- * `DragAndDropTransferData` has no constructor common code can call, so a shared implementation
- * cannot be written against it at all. Dragging a tile within your own rail is an internal
- * gesture; nothing outside this window has any business seeing the payload, and hit-testing
- * tiles we laid out ourselves is both portable and more precise than a mime-typed transfer.
- *
- * Targets register their window-space bounds as they are laid out, so the map is rebuilt by the
- * same pass that moves them and can never describe a layout that has since scrolled away.
- *
- * One instance per rail, remembered in [ServerRail] — a module-level `var` would be shared by
- * every window the app opens, so two windows dragging at once would overwrite each other.
+ * Module-scoped rather than hoisted through composition because the payload itself is what
+ * travels with the drag — a `ClipData` carrying the id is the cross-platform contract, and
+ * this only exists to let the drop target read it without re-parsing the event.
  */
-@Stable
-private class RailDrag {
-
-    /** The guild being dragged, or null. Observed so a travelling tile can dim itself. */
-    var draggedId by mutableStateOf<String?>(null)
-        private set
-
-    /** The target under the pointer. Observed so that tile can draw the drop ring. */
-    var hoveredKey by mutableStateOf<String?>(null)
-        private set
-
-    private var pointer = Offset.Zero
-    private val targets = mutableMapOf<String, Target>()
-
-    private class Target(val bounds: Rect, val ownerId: String?, val accept: (String) -> Unit)
-
-    fun register(key: String, bounds: Rect, ownerId: String?, accept: (String) -> Unit) {
-        targets[key] = Target(bounds, ownerId, accept)
-    }
-
-    /** Tiles must drop their registration when they leave composition, or bounds go stale. */
-    fun forget(key: String) {
-        targets.remove(key)
-    }
-
-    fun start(guildId: String, at: Offset) {
-        draggedId = guildId
-        pointer = at
-        hoveredKey = null
-    }
-
-    fun move(delta: Offset) {
-        pointer += delta
-        hoveredKey = targets.entries
-            // A tile is never a target for itself: dropping a server onto its own icon would
-            // otherwise ask the state layer to group it with itself.
-            .firstOrNull { (_, target) ->
-                target.ownerId != draggedId && target.bounds.contains(pointer)
-            }
-            ?.key
-    }
-
-    /** Applies the drop, if the pointer lifted over a target. */
-    fun drop() {
-        val dragged = draggedId
-        val target = hoveredKey?.let(targets::get)
-        draggedId = null
-        hoveredKey = null
-        if (dragged != null) target?.accept(dragged)
-    }
-
-    fun cancel() {
-        draggedId = null
-        hoveredKey = null
-    }
-}
+private var draggedGuildId: String? = null
 
 @Composable
 private fun AddServerDialog(

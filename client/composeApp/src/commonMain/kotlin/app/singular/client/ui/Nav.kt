@@ -2,12 +2,19 @@ package app.singular.client.ui
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.graphics.graphicsLayer
 
 /**
@@ -63,6 +70,45 @@ fun Modifier.animateEntrance(): Modifier {
         val p = progress.value
         alpha = p
         val scale = 0.94f + 0.06f * p
+        scaleX = scale
+        scaleY = scale
+    }
+}
+
+/**
+ * The motion vocabulary, in one place so every animation in the app can sound like one app.
+ *
+ * Durations are short on purpose: a chat UI should feel quick, not cinematic. The spring is
+ * shared so press states, pills and morphs land with the same weight everywhere.
+ */
+object Motion {
+    const val FAST = 120
+    const val BASE = 180
+    const val SLOW = 240
+
+    /** The press/spring curve. MediumLow keeps it tactile without overshoot jitter. */
+    val PressSpring = spring<Float>(stiffness = Spring.StiffnessMediumLow)
+    val SettleSpring = spring<Float>(
+        dampingRatio = Spring.DampingRatioNoBouncy,
+        stiffness = Spring.StiffnessMedium,
+    )
+}
+
+/**
+ * A tactile press: scales down a touch while held, springs back on release.
+ *
+ * Use on buttons and icon buttons, **not** on list rows — an interaction source per row in a
+ * long list is real state per row. Cheap on the few dozen controls it's meant for.
+ */
+fun Modifier.pressScale(): Modifier = composed {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = Motion.PressSpring,
+        label = "press-scale",
+    )
+    this.graphicsLayer {
         scaleX = scale
         scaleY = scale
     }

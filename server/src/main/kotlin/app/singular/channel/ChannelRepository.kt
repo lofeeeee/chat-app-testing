@@ -189,6 +189,20 @@ class ChannelRepository(private val jdbc: JdbcClient) {
             .update()
     }
 
+    /** The viewer's read cursor for a channel, or null when they've never read it. */
+    fun lastReadFor(channelId: Long, userId: Long): Long? = jdbc
+        .sql(
+            """
+            SELECT last_read_message_id FROM channel_members
+            WHERE channel_id = :c AND user_id = :u
+            """
+        )
+        .param("c", channelId)
+        .param("u", userId)
+        .query(Long::class.java)
+        .optional()
+        .orElse(null)
+
     private fun order(a: Long, b: Long) = if (a < b) a to b else b to a
 
     private companion object {

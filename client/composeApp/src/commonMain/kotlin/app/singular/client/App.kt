@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -37,6 +38,7 @@ import app.singular.client.ui.Route
 import app.singular.client.ui.SystemBackHandler
 import app.singular.client.ui.buildImageLoader
 import app.singular.client.ui.ChatScreen
+import app.singular.client.ui.ImageViewerHost
 import app.singular.client.ui.KeyboardScope
 import app.singular.client.ui.ProvideWindowSize
 import app.singular.client.ui.ShortcutsDialog
@@ -250,6 +252,7 @@ fun App(
                 onBack = { goBack() },
             )
 
+            Box(Modifier.fillMaxSize()) {
             // The shell's own key layer, wrapping every signed-in screen. Escape unwinds one
             // level; the Ctrl chords jump between destinations from wherever you are.
             KeyboardScope(
@@ -331,10 +334,24 @@ fun App(
                         }
                     }
                 }
+
+                // In-app transient messages, docked at the bottom edge. The host lives here so
+                // a snackbar survives route changes — a "send failed" raised in a conversation
+                // should not vanish when you open Settings to fix it.
+                SnackbarHost(
+                    hostState = state.snackbarHostState,
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
+
+                // Fullscreen image viewer, above everything. Rendered here so it survives the
+                // message that opened it leaving composition — a lightbox that dies with its
+                // source message is a lightbox you can never hold open while reading.
+                ImageViewerHost()
             }
+          }
          }
         }
        }
-      }
     }
+}
 }

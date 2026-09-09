@@ -1,6 +1,7 @@
 package app.singular.client.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,6 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -63,16 +65,11 @@ fun MentionsScreen(state: AppState, onClose: () -> Unit) {
         HorizontalDivider()
 
         if (state.mentionInbox.isEmpty()) {
-            Column(
-                Modifier.fillMaxSize().padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Text("Nobody's tagged you yet.", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "Messages that mention you — @you, a role you hold, or @everyone — collect here.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                EmptyState(
+                    icon = Icons.Filled.AlternateEmail,
+                    title = "Nobody's tagged you yet",
+                    hint = "Messages that mention you — @you, a role you hold, or @everyone — collect here.",
                 )
             }
         } else {

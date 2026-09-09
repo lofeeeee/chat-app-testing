@@ -11,6 +11,7 @@ import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
+import io.ktor.client.statement.readBytes
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
@@ -160,7 +161,7 @@ class SingularClient(
      * needs the bytes rather than a decoded bitmap, so it gets its own call.
      */
     suspend fun fetchBytes(url: String): ByteArray =
-        http.get(url).body<ByteArray>()
+        http.get(url).readBytes()
 
     fun close() = http.close()
 

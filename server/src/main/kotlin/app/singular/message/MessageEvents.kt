@@ -31,3 +31,29 @@ class MessageEvents(private val bus: FanoutBus) {
     fun subscribe(channelId: Long): Flux<Message> =
         bus.subscribe("message", channelId.toString())
 }
+
+/**
+ * Fanout for `messageUpdated` / `messageDeleted` — the correction stream for a timeline
+ * already rendered from `messageCreated`.
+ *
+ * Same channel key as [MessageEvents] (`singular:message:<channelId>`) but a different event
+ * type prefix, so a client's `messageCreated` subscription never receives a correction
+ * shaped like a new message, and vice versa: one channel per channel-id, two event types,
+ * distinguished by the FanoutBus envelope's type field.
+ */
+@Component
+class MessageUpdateEvents(private val bus: FanoutBus) {
+
+    fun publish(message: Message, deleted: Boolean) {
+        bus.publish("message-update", message.channelId.toString(), MessageUpdate(message, deleted))
+    }
+
+    fun subscribe(channelId: Long): Flux<MessageUpdate> =
+        bus.subscribe("message-update", channelId.toString())
+}
+
+/** A correction to an already-delivered message: new content, or a tombstone. */
+data class MessageUpdate(
+    val message: Message,
+    val deleted: Boolean,
+)

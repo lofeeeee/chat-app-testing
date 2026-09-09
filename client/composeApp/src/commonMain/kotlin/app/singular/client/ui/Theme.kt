@@ -1,5 +1,7 @@
 package app.singular.client.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -8,6 +10,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
@@ -109,7 +112,7 @@ private fun rememberSingularColors(preset: ThemePreset, dark: Boolean): Singular
     // area anyway.
     val canvas = composite(n.canvas, a.canvasTint)
 
-    return SingularColors(
+    val target = SingularColors(
         canvas = canvas,
         surface = n.surface,
         raised = n.raised,
@@ -125,6 +128,37 @@ private fun rememberSingularColors(preset: ThemePreset, dark: Boolean): Singular
         accentSoft = a.accentSoft,
         danger = a.danger,
     )
+
+    // Crossfade between palettes. Switching presets used to snap every surface in one frame,
+    // which reads as a glitch on the app's best-looking screen; each colour lerps to its new
+    // value over ~220ms instead. Reduced motion snaps straight to the target. The lerping is
+    // per-field rather than a whole-scheme crossfade because a ColorScheme is rebuilt per
+    // frame either way — lerping the source colours is the cheaper of the two.
+    if (LocalReducedMotion.current) return target
+
+    return SingularColors(
+        canvas = animateThemeColor(target.canvas),
+        surface = animateThemeColor(target.surface),
+        raised = animateThemeColor(target.raised),
+        sunken = animateThemeColor(target.sunken),
+        text = animateThemeColor(target.text),
+        textMuted = animateThemeColor(target.textMuted),
+        textFaint = animateThemeColor(target.textFaint),
+        line = animateThemeColor(target.line),
+        lineStrong = animateThemeColor(target.lineStrong),
+        notch = animateThemeColor(target.notch),
+        accent = animateThemeColor(target.accent),
+        onAccent = animateThemeColor(target.onAccent),
+        accentSoft = animateThemeColor(target.accentSoft),
+        danger = animateThemeColor(target.danger),
+    )
+}
+
+/** One animated colour, 220ms to wherever the palette is heading. */
+@Composable
+private fun animateThemeColor(target: Color): Color {
+    val animated by animateColorAsState(targetValue = target, animationSpec = tween(220))
+    return animated
 }
 
 /**

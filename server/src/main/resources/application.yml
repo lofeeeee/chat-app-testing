@@ -81,6 +81,8 @@ singular:
     qr-rotate:        { capacity: 30, refill-per-minute: 15.0 }   # anonymous rotation edge (per IP)
     qr-claim:         { capacity: 20, refill-per-minute: 10.0 }   # QR token brute-force (per user)
     send-message:     { capacity: 30, refill-per-minute: 120.0 }  # flood control (per user)
+    edit-message:     { capacity: 20, refill-per-minute: 30.0 }   # edit/delete churn (per user)
+    search-messages:  { capacity: 20, refill-per-minute: 30.0 }   # FTS is not free (per user)
 
   storage:
     endpoint: ${MINIO_ENDPOINT:http://localhost:9100}

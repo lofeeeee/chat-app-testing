@@ -96,14 +96,8 @@ fun SettingsScreen(state: AppState, onClose: () -> Unit) {
                 SettingsSection.SYSTEM -> SystemSection(state)
                 SettingsSection.ABOUT -> AboutSection()
             }
-
-            state.error?.let {
-                Text(
-                    it,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+            // Errors surface via the snackbar host (App.kt); keeping them inline here meant a
+            // failed avatar upload sat above the Save button until you left and came back.
         }
     }
 }

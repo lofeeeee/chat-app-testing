@@ -49,6 +49,9 @@ expect class AudioRecorder() {
  * other is never what anyone meant — starting one stops the last.
  */
 expect class AudioPlayer() {
+    // Read-only, and both actuals keep private volatile backing fields behind these. Playback
+    // state is something the platform reports; a caller assigning `isPlaying = true` would
+    // desync the UI from the audio device without stopping or starting anything.
     val isPlaying: Boolean
     /** Seconds elapsed, updated by the platform's own progress source. */
     val positionSeconds: Float

@@ -1,5 +1,10 @@
 package app.singular.client.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -15,25 +20,34 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.buildAnnotatedString
@@ -342,30 +356,47 @@ fun MessageList(
     resolver: MentionResolver = remember(selfId) { MentionResolver(emptyMap(), emptyMap(), emptyMap(), selfId) },
     onReact: (messageId: String, emoji: String) -> Unit = { _, _ -> },
     onMessageLongPress: (MessageDto) -> Unit = {},
+    /** Whether a message is an unacknowledged optimistic placeholder. Client-only. */
+    isPending: (String) -> Boolean = { false },
+    /** Whether a placeholder's send failed and is awaiting retry. */
+    isFailed: (String) -> Boolean = { false },
+    /** Called when the user taps a failed placeholder to retry. */
+    onRetry: (MessageDto) -> Unit = {},
 ) {
     val rendered = remember(messages.toList(), selfId) { groupMessages(messages, selfId) }
 
-    LazyColumn(
-        state = listState,
-        modifier = modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        items(rendered, key = { it.message.id }) { row ->
-            // New messages settle in with a short fade; reduced motion turns it off.
-            Box(if (LocalReducedMotion.current) Modifier else Modifier.animateItem()) {
-                // A little air between runs, none within one. This spacing is what actually
-                // makes grouping read as grouping.
-                Column {
-                    if (row.startsGroup) Spacer(Modifier.size(10.dp))
+    Box(modifier) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            items(rendered, key = { it.message.id }) { row ->
+                // New messages settle in with a short fade; reduced motion turns it off.
+                Box(if (LocalReducedMotion.current) Modifier else Modifier.animateItem()) {
+                    // A little air between runs, none within one. This spacing is what actually
+                    // makes grouping read as grouping.
+                    Column {
+                        if (row.startsGroup) Spacer(Modifier.size(10.dp))
 
-                    when (layout) {
-                        ChatLayout.BUBBLES -> BubbleRow(row, resolver, onReact, onMessageLongPress)
-                        ChatLayout.COMPACT -> CompactRow(row, resolver, onReact, onMessageLongPress)
+                        when (layout) {
+                            ChatLayout.BUBBLES -> BubbleRow(
+                                row, resolver, onReact, onMessageLongPress, isPending, isFailed, onRetry,
+                            )
+                            ChatLayout.COMPACT -> CompactRow(
+                                row, resolver, onReact, onMessageLongPress, isPending, isFailed, onRetry,
+                            )
+                        }
                     }
                 }
             }
         }
+
+        PlatformScrollbar(
+            state = listState,
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(10.dp),
+        )
     }
 }
 
@@ -379,6 +410,9 @@ private fun BubbleRow(
     resolver: MentionResolver,
     onReact: (String, String) -> Unit,
     onMessageLongPress: (MessageDto) -> Unit,
+    isPending: (String) -> Boolean,
+    isFailed: (String) -> Boolean,
+    onRetry: (MessageDto) -> Unit,
 ) {
     val message = row.message
 
@@ -393,13 +427,24 @@ private fun BubbleRow(
     val mentioned = resolver.mentionsMe(message.content)
     val accent = LocalSingularColors.current.accentSoft
 
-    Row(
+    // Hover reveals a small action cluster. Long-press (touch) and the cluster (mouse) drive
+    // the same handlers, so there is one definition of what you can do to a message — the
+    // input device only changes how you get to it.
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+
+    Box(
         Modifier
             .fillMaxWidth()
-            .height(IntrinsicSize.Min)
-            .padding(vertical = 1.dp),
-        horizontalArrangement = if (row.mine) Arrangement.End else Arrangement.Start,
+            .hoverable(interaction),
     ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
+                .padding(vertical = 1.dp),
+            horizontalArrangement = if (row.mine) Arrangement.End else Arrangement.Start,
+        ) {
         if (mentioned) {
             Box(Modifier.width(3.dp).fillMaxHeight().background(accent))
             Spacer(Modifier.width(9.dp))
@@ -444,7 +489,7 @@ private fun BubbleRow(
                     .background(if (mentioned) accent.copy(alpha = 0.10f) else Color.Transparent)
                     .padding(vertical = 2.dp),
             ) {
-                Bubble(row, resolver, onMessageLongPress)
+                Bubble(row, resolver, onMessageLongPress, isPending, isFailed, onRetry)
 
                 // Outside the bubble, tucked under its edge — a response to the message rather
                 // than part of it, and legible on the canvas instead of on the bubble's fill.
@@ -459,6 +504,15 @@ private fun BubbleRow(
         }
 
         if (row.mine) Spacer(Modifier.width(8.dp))
+        }
+
+        MessageHoverActions(
+            visible = hovered,
+            mine = row.mine,
+            onReact = { onMessageLongPress(message) },
+            onCopy = message.content,
+            modifier = Modifier.align(if (row.mine) Alignment.TopStart else Alignment.TopEnd),
+        )
     }
 }
 
@@ -468,6 +522,9 @@ private fun Bubble(
     row: RenderedMessage,
     resolver: MentionResolver,
     onMessageLongPress: (MessageDto) -> Unit,
+    isPending: (String) -> Boolean,
+    isFailed: (String) -> Boolean,
+    onRetry: (MessageDto) -> Unit,
 ) {
     val message = row.message
     var revealed by remember(message.id) { mutableStateOf(false) }
@@ -511,12 +568,28 @@ private fun Bubble(
                 // Column — and so the bubble — out to the 520dp maximum no matter how short
                 // the message, which is exactly the "bubbles are too big" problem. Aligning a
                 // wrap-content child leaves the bubble sized to its longest line.
-                Text(
-                    shortTime(message.createdAt),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = foreground.copy(alpha = 0.65f),
-                    modifier = Modifier.align(Alignment.End),
-                )
+                when {
+                    isFailed(message.id) -> TextButton(
+                        onClick = { onRetry(message) },
+                        modifier = Modifier.align(Alignment.End),
+                    ) { Text("Failed — tap to retry", style = MaterialTheme.typography.labelSmall) }
+                    isPending(message.id) -> Text(
+                        "Sending…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = foreground.copy(alpha = 0.55f),
+                        modifier = Modifier.align(Alignment.End),
+                    )
+                    else -> Text(
+                        // "(edited)" travels with the time rather than the body: it is metadata
+                        // about the message, not part of what was said, and this placement is
+                        // where every major chat client has taught people to look for it.
+                        shortTime(message.createdAt) +
+                            (message.editedAt?.let { " · edited" } ?: ""),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = foreground.copy(alpha = 0.65f),
+                        modifier = Modifier.align(Alignment.End),
+                    )
+                }
             }
         }
     }
@@ -533,6 +606,9 @@ private fun CompactRow(
     resolver: MentionResolver,
     onReact: (String, String) -> Unit,
     onMessageLongPress: (MessageDto) -> Unit,
+    isPending: (String) -> Boolean,
+    isFailed: (String) -> Boolean,
+    onRetry: (MessageDto) -> Unit,
 ) {
     val message = row.message
     var revealed by remember(message.id) { mutableStateOf(false) }
@@ -547,16 +623,24 @@ private fun CompactRow(
     val mentioned = resolver.mentionsMe(message.content)
     val accent = LocalSingularColors.current.accentSoft
 
-    Row(
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+
+    Box(
         Modifier
             .fillMaxWidth()
-            // IntrinsicSize.Min so the accent bar's fillMaxHeight resolves against this row's
-            // own height. Without it, a Row is wrap-content and fillMaxHeight would take the
-            // incoming maximum — the height of the whole viewport, not of the message.
-            .height(IntrinsicSize.Min)
-            .padding(vertical = 1.dp),
-        verticalAlignment = Alignment.Top,
+            .hoverable(interaction),
     ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                // IntrinsicSize.Min so the accent bar's fillMaxHeight resolves against this row's
+                // own height. Without it, a Row is wrap-content and fillMaxHeight would take the
+                // incoming maximum — the height of the whole viewport, not of the message.
+                .height(IntrinsicSize.Min)
+                .padding(vertical = 1.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
         if (mentioned) {
             Box(
                 Modifier
@@ -598,11 +682,22 @@ private fun CompactRow(
                                 else MaterialTheme.colorScheme.onSurface,
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text(
-                        shortTime(message.createdAt),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    when {
+                        isFailed(message.id) -> TextButton(onClick = { onRetry(message) }) {
+                            Text("Failed — retry", style = MaterialTheme.typography.labelSmall)
+                        }
+                        isPending(message.id) -> Text(
+                            "Sending…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        else -> Text(
+                            shortTime(message.createdAt) +
+                                (message.editedAt?.let { " · edited" } ?: ""),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
 
@@ -623,6 +718,74 @@ private fun CompactRow(
                         onReact = { emoji -> onReact(message.id, emoji) },
                         modifier = Modifier.padding(top = 4.dp, bottom = 2.dp),
                     )
+                }
+            }
+        }
+        }
+
+        MessageHoverActions(
+            visible = hovered,
+            mine = row.mine,
+            onReact = { onMessageLongPress(message) },
+            onCopy = message.content,
+            modifier = Modifier.align(if (row.mine) Alignment.TopStart else Alignment.TopEnd),
+        )
+    }
+}
+
+/**
+ * The action cluster that appears over a message on hover.
+ *
+ * **Mouse-only by construction**: `onPointerEvent(Enter/Exit)` only fires for a pointer that
+ * hovers, so on a touchscreen nothing changes — long-press keeps doing what it always did, and
+ * the two inputs can never fight for the same gesture.
+ *
+ * The cluster sits at the row's free edge, which is why it never covers the message text —
+ * the bubble stack is offset toward the author, and the edge against it is empty.
+ */
+@Composable
+private fun MessageHoverActions(
+    visible: Boolean,
+    mine: Boolean,
+    onReact: () -> Unit,
+    onCopy: String?,
+    modifier: Modifier = Modifier,
+) {
+    val clipboard = LocalClipboardManager.current
+
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(Motion.FAST)) + scaleIn(initialScale = 0.96f, animationSpec = tween(Motion.BASE)),
+        exit = fadeOut(tween(Motion.FAST)),
+        modifier = modifier.padding(top = 2.dp),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 4.dp,
+            shadowElevation = 4.dp,
+        ) {
+            Row(
+                Modifier.padding(horizontal = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // React. Quick one-tap onto the message, same as the long-press sheet — one
+                // gesture, two input devices.
+                IconButton(onClick = onReact, modifier = Modifier.size(30.dp)) {
+                    Text("😀", fontSize = 15.sp)
+                }
+                onCopy?.takeIf { it.isNotBlank() }?.let { text ->
+                    IconButton(
+                        onClick = { clipboard.setText(AnnotatedString(text)) },
+                        modifier = Modifier.size(30.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.ContentCopy,
+                            contentDescription = "Copy message text",
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }

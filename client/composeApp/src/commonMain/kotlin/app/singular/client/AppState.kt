@@ -63,6 +63,17 @@ import app.singular.client.net.CreateStoryData
 import app.singular.client.net.CreateUploadData
 import app.singular.client.net.FinalizeUploadData
 import app.singular.client.net.SendLocationData
+import app.singular.client.net.ChannelUnreadDto
+import app.singular.client.net.DeleteMessageData
+import app.singular.client.net.EditMessageData
+import app.singular.client.net.MarkReadData
+import app.singular.client.net.MessageUpdateEventDto
+import app.singular.client.net.MessageUpdatedData
+import app.singular.client.net.PinMessageData
+import app.singular.client.net.PinnedMessagesData
+import app.singular.client.net.SearchMessagesData
+import app.singular.client.net.UnpinMessageData
+import app.singular.client.net.UnreadCountsData
 import app.singular.client.net.CreateGuildChannelData
 import app.singular.client.net.CreateGuildData
 import app.singular.client.net.CreateGroupDmData
@@ -139,11 +150,40 @@ class AppState(
      */
     fun reportError(message: String) {
         error = message
+        showSnackbar(message)
+    }
+
+    // -- Transient messages ----------------------------------------------------
+
+    /** Host for in-app transient messages. Bound in App and shown at the bottom edge. */
+    val snackbarHostState = androidx.compose.material3.SnackbarHostState()
+
+    /**
+     * Shows a short-lived in-app message. Auto-dismisses; unlike [error], which sits on screen
+     * until cleared, a snackbar is the right home for "that worked" and "that failed, retry?"
+     * — the kinds of sentences that should not become furniture.
+     */
+    fun showSnackbar(message: String, actionLabel: String? = null, onAction: (() -> Unit)? = null) {
+        scope.launch {
+            // Cancels any in-flight snackbar rather than queuing: two events one click apart
+            // should not stack two toasts and read as if the app is yelling.
+            snackbarHostState.currentSnackbarData?.dismiss()
+            val result = snackbarHostState.showSnackbar(
+                message = message,
+                actionLabel = actionLabel,
+                withDismissAction = true,
+            )
+            if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) onAction?.invoke()
+        }
     }
 
     var busy by mutableStateOf(false)
         private set
     var error by mutableStateOf<String?>(null)
+
+    /** True while the first page of a freshly opened channel is in flight. */
+    var loadingChannel by mutableStateOf(false)
+        private set
 
     /**
      * Who is currently typing here, keyed by user id.
@@ -313,6 +353,27 @@ class AppState(
             AudioDeviceChoice.output = value
         }
 
+    // -- Layout preferences ------------------------------------------------
+
+    private var sidebarWidthState by mutableStateOf(
+        readLocalString(SIDEBAR_WIDTH)?.toIntOrNull() ?: 260
+    )
+
+    /**
+     * The channel sidebar's width in dp, user-draggable within 200..400.
+     *
+     * A local preference, like the theme dark-mode toggle: how wide your channel list is a
+     * property of this screen and this window, and syncing it to every device would make a
+     * 12-inch laptop and a 34-inch monitor disagree about what "comfortable" means.
+     */
+    var sidebarWidthDp: Int
+        get() = sidebarWidthState
+        set(value) {
+            val clamped = value.coerceIn(200, 400)
+            sidebarWidthState = clamped
+            writeLocalString(SIDEBAR_WIDTH, clamped.toString())
+        }
+
     /** Master switch. Off means the app never raises a system notification. */
     var notifyEnabled: Boolean
         get() = notifyEnabledState
@@ -360,6 +421,7 @@ class AppState(
     private var subscription: Job? = null
     private var typingSubscription: Job? = null
     private var reactionSubscription: Job? = null
+    private var updateSubscription: Job? = null
     private var presenceSubscription: Job? = null
     private var notificationSubscription: Job? = null
     private var heartbeatJob: Job? = null
@@ -777,24 +839,52 @@ class AppState(
         selectedChannel = channel
         unread.remove(channel.id)
         mentionCounts.remove(channel.id)
-        val vars = buildJsonObject {
-            put("channelId", channel.id)
-            put("limit", 50)
-        }
-        // The server returns newest-first for cursor pagination; the UI reads oldest-first.
-        val page = client.execute<MessagesData>(Operations.MESSAGES, vars).messages.nodes.reversed()
-        messages.clear()
-        messages.addAll(page)
 
-        // The @-autocomplete source: guild channels need the server's member list; DMs already
-        // carry theirs on the channel. Loaded after the messages so a slow members fetch can
-        // never delay the conversation appearing.
-        channelMembers.clear()
-        selectedGuild?.let { guild ->
-            if (guild.channels.any { it.id == channel.id }) loadChannelMembers(guild.id)
-        }
+        // Shown while the first page is in flight: an empty pane reads as "this chat is
+        // empty", which it isn't — it's just slow. The flag is cleared in the finally so a
+        // failed fetch can't leave it up forever.
+        loadingChannel = true
+        try {
+            val vars = buildJsonObject {
+                put("channelId", channel.id)
+                put("limit", 50)
+            }
+            // The server returns newest-first for cursor pagination; the UI reads oldest-first.
+            val page = client.execute<MessagesData>(Operations.MESSAGES, vars).messages.nodes.reversed()
+            messages.clear()
+            messages.addAll(page)
 
-        watch(channel.id)
+            // Advance the server-side read cursor to the newest message we're rendering.
+            // Fire-and-forget with the page's newest id: the point is "everything on screen
+            // has been seen", and the page we just fetched IS everything on screen. Best
+            // effort — a failed cursor write costs a stale unread count elsewhere, never
+            // a broken screen.
+            page.lastOrNull()?.let { newest ->
+                scope.launch {
+                    runCatching {
+                        client.execute<MarkReadData>(
+                            Operations.MARK_READ,
+                            buildJsonObject {
+                                put("channelId", channel.id)
+                                put("messageId", newest.id)
+                            },
+                        )
+                    }
+                }
+            }
+
+            // The @-autocomplete source: guild channels need the server's member list; DMs already
+            // carry theirs on the channel. Loaded after the messages so a slow members fetch can
+            // never delay the conversation appearing.
+            channelMembers.clear()
+            selectedGuild?.let { guild ->
+                if (guild.channels.any { it.id == channel.id }) loadChannelMembers(guild.id)
+            }
+
+            watch(channel.id)
+        } finally {
+            loadingChannel = false
+        }
     }
 
     /**
@@ -924,6 +1014,26 @@ class AppState(
         val channel = selectedChannel ?: return
         val body = text.trim()
         if (body.isEmpty()) return
+        val self = currentUser ?: return
+
+        val nonce = newNonce()
+        // The optimistic message: it appears the instant you hit send, before the server has
+        // said anything, because waiting on a round trip to see your own words is what makes a
+        // chat client feel slow. Its id is the nonce, not a snowflake — it is *not* a real
+        // message yet, and when the server answers the real one replaces it by nonce, never
+        // appearing twice (appendIfNew dedupes on the snowflake id). `createdAt` is borrowed
+        // from the newest existing message so the grouping math isn't disturbed for the <1s
+        // the placeholder is on screen; the list renders a "sending" affordance instead of a
+        // timestamp anyway.
+        val pending = MessageDto(
+            id = "pending:$nonce",
+            channelId = channel.id,
+            author = self,
+            content = body,
+            createdAt = messages.lastOrNull()?.createdAt.orEmpty(),
+        )
+        pendingSends[nonce] = body
+        messages.add(pending)
 
         scope.launch {
             try {
@@ -933,16 +1043,184 @@ class AppState(
                         put("content", body)
                         // Idempotency key: if the reply is lost to a flaky connection, resending
                         // this exact nonce returns the original message instead of a duplicate.
-                        put("nonce", newNonce())
+                        put("nonce", nonce)
                     })
                 }
                 val sent = client.execute<SendMessageData>(Operations.SEND_MESSAGE, vars).message
-                // Show it immediately, unconditionally. The subscription echoes it back too,
-                // but appendIfNew dedupes on the snowflake — so the message appears even when
-                // the socket is down, instead of waiting on an echo that may never arrive.
+                // Swap the placeholder for the real one — remove the temp, add the real id.
+                removePending(nonce)
                 appendIfNew(sent)
             } catch (e: Exception) {
-                error = describe(e)
+                // Leave the temp in place but flagged, so the user can see what didn't send
+                // and retry with the same nonce — which is exactly what the server treats as
+                // a retry of a possibly-lost send rather than a new message.
+                markPendingFailed(nonce)
+                showSnackbar("Couldn't send. Tap to retry.", actionLabel = "Retry") {
+                    retrySend(channel, nonce)
+                }
+            }
+        }
+    }
+
+    /** Temp messages awaiting a server answer, keyed by nonce. Client-only. */
+    private val pendingSends = mutableStateMapOf<String, String>()
+    private val failedSends = mutableStateMapOf<String, String>()
+
+    private fun removePending(nonce: String) {
+        val id = "pending:$nonce"
+        messages.removeAll { it.id == id }
+        pendingSends.remove(nonce)
+        failedSends.remove(nonce)
+    }
+
+    private fun markPendingFailed(nonce: String) {
+        failedSends[nonce] = pendingSends[nonce] ?: return
+    }
+
+    /** True when this message is a not-yet-acked placeholder. */
+    fun isPending(messageId: String): Boolean = messageId.startsWith("pending:")
+
+    /** True when a placeholder's send failed and is awaiting retry. */
+    fun isFailedSend(messageId: String): Boolean =
+        messageId.startsWith("pending:") && failedSends.containsKey(messageId.removePrefix("pending:"))
+
+    /** Re-sends a failed placeholder with the SAME nonce — the server's dedup key. */
+    private fun retrySend(channel: ChannelDto, nonce: String) {
+        val body = failedSends[nonce] ?: pendingSends[nonce] ?: return
+        scope.launch {
+            try {
+                val vars = buildJsonObject {
+                    put("input", buildJsonObject {
+                        put("channelId", channel.id)
+                        put("content", body)
+                        put("nonce", nonce)
+                    })
+                }
+                val sent = client.execute<SendMessageData>(Operations.SEND_MESSAGE, vars).message
+                removePending(nonce)
+                appendIfNew(sent)
+            } catch (e: Exception) {
+                showSnackbar("Still couldn't send. Check the connection.")
+            }
+        }
+    }
+
+    /** Public entry for retrying a failed placeholder from the message list. */
+    fun retryFailed(message: MessageDto) {
+        val channel = selectedChannel ?: return
+        val nonce = message.id.removePrefix("pending:")
+        if (message.id.startsWith("pending:")) retrySend(channel, nonce)
+    }
+
+    // -- Edit, delete, pin ---------------------------------------------------
+
+    /**
+     * Edits one of your own messages. Optimistic — the row is replaced immediately and the
+     * `messageUpdated` echo corrects any drift (it also reaches every other viewer, which is
+     * the point of the correction stream).
+     */
+    fun editMessage(messageId: String, content: String) {
+        val index = messages.indexOfFirst { it.id == messageId }
+        if (index == -1) return
+        val current = messages[index]
+
+        // Optimistic: keep the row interactive while the request is in flight.
+        messages[index] = current.copy(content = content, editedAt = nowIso())
+
+        scope.launch {
+            try {
+                val updated = client.execute<EditMessageData>(
+                    Operations.EDIT_MESSAGE,
+                    buildJsonObject {
+                        put("messageId", messageId)
+                        put("content", content)
+                    },
+                ).message
+                val live = messages.indexOfFirst { it.id == messageId }
+                if (live != -1) messages[live] = updated
+            } catch (e: Exception) {
+                // Roll back to the pre-edit text so the screen never shows words the server
+                // rejected as final.
+                val live = messages.indexOfFirst { it.id == messageId }
+                if (live != -1) messages[live] = current
+                showSnackbar(describe(e))
+            }
+        }
+    }
+
+    /** Deletes a message (yours, or one you moderate). Removed locally; the echo confirms. */
+    fun deleteMessage(messageId: String) {
+        val index = messages.indexOfFirst { it.id == messageId }
+        if (index == -1) return
+
+        scope.launch {
+            try {
+                client.execute<DeleteMessageData>(
+                    Operations.DELETE_MESSAGE,
+                    buildJsonObject { put("messageId", messageId) },
+                )
+                // The subscription echo removes it; doing it here too makes the removal
+                // immediate on the machine that asked, rather than one round trip later.
+                val live = messages.indexOfFirst { it.id == messageId }
+                if (live != -1) messages.removeAt(live)
+            } catch (e: Exception) {
+                showSnackbar(describe(e))
+            }
+        }
+    }
+
+    /** Toggles a pin. Tracked in a set so the UI can badge pinned rows without a refetch. */
+    fun togglePin(messageId: String) {
+        val pinned = pinnedIds.contains(messageId)
+        scope.launch {
+            try {
+                client.execute<PinMessageData>(
+                    if (pinned) Operations.UNPIN_MESSAGE else Operations.PIN_MESSAGE,
+                    buildJsonObject { put("messageId", messageId) },
+                )
+                if (pinned) pinnedIds.remove(messageId) else pinnedIds.add(messageId)
+            } catch (e: Exception) {
+                showSnackbar(describe(e))
+            }
+        }
+    }
+
+    /** Pins for the open channel, loaded when the channel opens. */
+    val pinnedIds = mutableStateListOf<String>()
+
+    private fun loadPins(channelId: String) {
+        scope.launch {
+            try {
+                val pinned = client.execute<PinnedMessagesData>(
+                    Operations.PINNED_MESSAGES,
+                    buildJsonObject { put("channelId", channelId) },
+                ).messages
+                pinnedIds.clear()
+                pinned.forEach { pinnedIds.add(it.id) }
+            } catch (_: Exception) {
+                // A missing pin drawer is a cosmetic gap, not an error worth a banner.
+            }
+        }
+    }
+
+    /**
+     * Searches the open channel's history. Server-bounded to the last year, newest first.
+     */
+    fun searchChannel(query: String, onDone: (List<MessageDto>) -> Unit) {
+        val channel = selectedChannel ?: return
+        scope.launch {
+            try {
+                val results = client.execute<SearchMessagesData>(
+                    Operations.SEARCH_MESSAGES,
+                    buildJsonObject {
+                        put("channelId", channel.id)
+                        put("query", query)
+                    },
+                ).messages
+                onDone(results)
+            } catch (e: Exception) {
+                showSnackbar(describe(e))
+                onDone(emptyList())
             }
         }
     }
@@ -958,6 +1236,8 @@ class AppState(
         clearTyping()
         watchTyping(channelId)
         watchReactions(channelId)
+        watchUpdates(channelId)
+        loadPins(channelId)
         subscription?.cancel()
         subscription = scope.launch {
             var backoff = 1_000L
@@ -1037,6 +1317,61 @@ class AppState(
         messages[index] = message.copy(
             reactions = update.reactions.map { it.copy(me = it.emoji in mine) }
         )
+    }
+
+    /**
+     * The correction stream for the open channel: edits and deletions of messages already
+     * rendered. Same reconnect-with-backoff shape as the other per-channel watchers, and the
+     * same tolerance for drops — a dropped correction is corrected by the next one, or by
+     * reopening the channel, and never worth a red banner over a working conversation.
+     */
+    private fun watchUpdates(channelId: String) {
+        updateSubscription?.cancel()
+        updateSubscription = scope.launch {
+            var backoff = 1_000L
+            while (true) {
+                try {
+                    client.subscribe(
+                        Operations.MESSAGE_UPDATED,
+                        buildJsonObject { put("channelId", channelId) },
+                    ).collect { data ->
+                        backoff = 1_000L
+                        val event = SingularClient.codec
+                            .decodeFromJsonElement(MessageUpdatedData.serializer(), data).event
+                        if (event.message.channelId == selectedChannel?.id) {
+                            applyMessageUpdate(event)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e   // shutting down, not failing — see watch()
+                } catch (_: Exception) {
+                    // Same policy as reactions.
+                }
+                delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(30_000L)
+            }
+        }
+    }
+
+    /**
+     * Applies one edit or deletion to the open channel's message list.
+     *
+     * A delete also clears the pin badge (a deleted pin is not a pin) and drops the sidebar
+     * preview when the deleted message was the channel's newest — a preview of a message
+     * that no longer exists is a ghost.
+     */
+    private fun applyMessageUpdate(event: MessageUpdateEventDto) {
+        val index = messages.indexOfFirst { it.id == event.message.id }
+        if (event.deleted) {
+            if (index != -1) messages.removeAt(index)
+            pinnedIds.remove(event.message.id)
+            if (lastMessages[event.message.channelId]?.id == event.message.id) {
+                lastMessages.remove(event.message.channelId)
+            }
+            return
+        }
+        if (index == -1) return
+        messages[index] = event.message
     }
 
     /**
@@ -2200,11 +2535,41 @@ class AppState(
     private fun newNonce(): String =
         (1..16).map { NONCE_ALPHABET[Random.nextInt(NONCE_ALPHABET.length)] }.joinToString("")
 
+    /**
+     * Wire-format "now", for optimistic `editedAt` stamps that the server echo replaces.
+     *
+     * Hand-built ISO-8601 rather than a datetime dependency: the value is cosmetic (the
+     * server's echo overwrites it within a round trip), only needs to sort as a plausible
+     * timestamp, and every platform target already has `currentTimeMillis`.
+     */
+    private fun nowIso(): String {
+        val millis = System.currentTimeMillis()
+        val seconds = millis / 1000
+        val ms = millis % 1000
+        // Civil-from-days (Howard Hinnant): pure integer arithmetic, no calendar library.
+        val z = (seconds / 86_400L) + 719_468L
+        val era = z / 146_097L
+        val doe = z - era * 146_097L
+        val yoe = (doe - doe / 1460L + doe / 36_524L - doe / 146_096L) / 365L
+        val y = yoe + era * 400L
+        val doy = doe - (365L * yoe + yoe / 4L - yoe / 100L)
+        val mp = (5L * doy + 2L) / 153L
+        val d = doy - (153L * mp + 2L) / 5L + 1L
+        val m = if (mp < 10L) mp + 3L else mp - 9L
+        val year = if (m <= 2L) y + 1L else y
+        val rem = seconds % 86_400L
+        val h = rem / 3600L
+        val min = (rem % 3600L) / 60L
+        val s = rem % 60L
+        return "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ".format(year, m, d, h, min, s, ms)
+    }
+
     private companion object {
         const val NOTIFY_ENABLED = "notify_enabled"
         const val NOTIFY_MENTIONS_ONLY = "notify_mentions_only"
         const val NOTIFY_PREVIEWS = "notify_previews"
         const val REDUCE_MOTION = "reduce_motion"
+        const val SIDEBAR_WIDTH = "sidebar_width_dp"
 
         const val NONCE_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 

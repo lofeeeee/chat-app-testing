@@ -156,6 +156,135 @@ class MessageRepository(private val jdbc: JdbcClient) {
             .associateBy { it.id }
     }
 
+    /**
+     * Rewrite a message's body. The WHERE guards both authorisation outcomes the service has
+     * already checked (existence, not deleted) so a race with a concurrent delete loses
+     * cleanly here — zero rows — rather than resurrecting a tombstone.
+     */
+    fun edit(id: Long, createdAt: Instant, content: String, editedAt: Instant): Boolean = jdbc
+        .sql(
+            """
+            UPDATE messages SET content = :content, edited_at = :editedAt
+            WHERE id = :id AND created_at = :createdAt AND deleted_at IS NULL
+            """
+        )
+        .param("content", content)
+        .param("editedAt", Timestamp.from(editedAt))
+        .param("id", id)
+        .param("createdAt", Timestamp.from(createdAt))
+        .update() == 1
+
+    /**
+     * Soft delete. The row stays (mention rows and pins reference it by id; hard-deleting
+     * would need cascade logic across a partitioned table for no benefit), but every read
+     * path filters `deleted_at IS NULL`, so it is gone as far as anyone can see.
+     */
+    fun softDelete(id: Long, createdAt: Instant, deletedAt: Instant): Boolean = jdbc
+        .sql(
+            """
+            UPDATE messages SET deleted_at = :deletedAt, content = NULL
+            WHERE id = :id AND created_at = :createdAt AND deleted_at IS NULL
+            """
+        )
+        .param("deletedAt", Timestamp.from(deletedAt))
+        .param("id", id)
+        .param("createdAt", Timestamp.from(createdAt))
+        .update() == 1
+
+    /**
+     * Unread count for one (channel, viewer): messages between the viewer's cursor and now.
+     *
+     * An index range scan on ix_messages_channel read backwards — the btree is ordered by
+     * (channel_id, id DESC), so `id > :cursor` is a contiguous slice of it. The two-sided
+     * created_at window is here for the same reason as everywhere else: partition pruning.
+     */
+    fun countSince(channelId: Long, afterId: Long, floor: Instant, ceiling: Instant): Int = jdbc
+        .sql(
+            """
+            SELECT count(*) FROM messages
+            WHERE channel_id = :channel
+              AND created_at >= :floor
+              AND created_at <= :ceiling
+              AND id > :afterId
+              AND deleted_at IS NULL
+            """
+        )
+        .param("channel", channelId)
+        .param("afterId", afterId)
+        .param("floor", Timestamp.from(floor))
+        .param("ceiling", Timestamp.from(ceiling))
+        .query(Int::class.java)
+        .single()
+
+    /**
+     * Batch unread counts for the sidebar: every DM/group channel the viewer is in, with how
+     * many live messages sit past their cursor. One query for the whole list rather than one
+     * per row — the same shape as the other sidebar batch fetches.
+     *
+     * Guild channels are deliberately absent here: they have no `channel_members` row, so
+     * there is no cursor to count from. Guild unread state is client-side only for now.
+     */
+    fun unreadCountsFor(userId: Long, floor: Instant, ceiling: Instant): Map<Long, Int> = jdbc
+        .sql(
+            """
+            SELECT m.channel_id,
+                   count(*) FILTER (WHERE msg.id > m.last_read_message_id AND msg.deleted_at IS NULL) AS unread
+            FROM channel_members m
+            JOIN channels c ON c.id = m.channel_id AND c.deleted_at IS NULL AND c.guild_id IS NULL
+            JOIN LATERAL (
+                SELECT id FROM messages
+                WHERE channel_id = m.channel_id
+                  AND created_at >= :floor
+                  AND created_at <= :ceiling
+                  AND author_id <> :userId
+                  AND deleted_at IS NULL
+            ) msg ON true
+            GROUP BY m.channel_id
+            """
+        )
+        .param("userId", userId)
+        .param("floor", Timestamp.from(floor))
+        .param("ceiling", Timestamp.from(ceiling))
+        .query { rs, _ -> rs.getLong("channel_id") to rs.getInt("unread") }
+        .list()
+        .toMap()
+
+    /**
+     * Full-text search within one channel, newest first.
+     *
+     * `plainto_tsquery` rather than `to_tsquery` because it takes the raw user string and
+     * ANDs the terms — users type "meeting notes", not "meeting & notes", and the failure
+     * mode of the strict form on free text is a syntax error returned as a 500.
+     */
+    fun search(
+        channelId: Long,
+        query: String,
+        limit: Int,
+        floor: Instant,
+        ceiling: Instant,
+    ): List<Message> = jdbc
+        .sql(
+            """
+            SELECT id, channel_id, author_id, content, reply_to_id, created_at, edited_at,
+                   location_lat, location_lon, location_label, location_expires_at
+            FROM messages
+            WHERE channel_id = :channel
+              AND created_at >= :floor
+              AND created_at <= :ceiling
+              AND deleted_at IS NULL
+              AND content_tsv @@ plainto_tsquery('simple', :query)
+            ORDER BY id DESC
+            LIMIT :limit
+            """
+        )
+        .param("channel", channelId)
+        .param("query", query)
+        .param("limit", limit)
+        .param("floor", Timestamp.from(floor))
+        .param("ceiling", Timestamp.from(ceiling))
+        .query(::mapMessage)
+        .list()
+
     // -- Idempotency ---------------------------------------------------------
     //
     // Postgres requires a unique index on a partitioned table to include every partition key
