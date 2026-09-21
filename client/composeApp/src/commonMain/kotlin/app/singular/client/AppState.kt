@@ -400,7 +400,6 @@ class AppState(
     private var updateSubscription: Job? = null
     private var presenceSubscription: Job? = null
     private var notificationSubscription: Job? = null
-    private var heartbeatJob: Job? = null
     private val typingExpiry = mutableMapOf<String, Job>()
     private var lastTypingSent = TimeSource.Monotonic.markNow() - TYPING_THROTTLE
 
@@ -517,7 +516,6 @@ class AppState(
         }
         currentUser?.let { myStatus = it.status }
         watchPresence()
-        startHeartbeat()
         runCatching { loadStories() }
         runCatching { loadGuilds() }
         // After the servers: the arrangement refers to them by id, and a folder whose members
@@ -527,21 +525,15 @@ class AppState(
         watchNotifications()
     }
 
-    /**
-     * Keeps us marked online.
-     *
-     * The server treats a user with no recent heartbeat as offline regardless of what status
-     * they chose, so this is what stops you going grey while you're sitting there reading.
-     */
-    private fun startHeartbeat() {
-        heartbeatJob?.cancel()
-        heartbeatJob = scope.launch {
-            while (true) {
-                runCatching { client.execute<HeartbeatData>(Operations.HEARTBEAT) }
-                delay(HEARTBEAT_MS)
-            }
-        }
-    }
+/**
+ * Reconnect delay with randomised jitter, ±40%.
+ *
+ * Every watcher loop doubles from the same 1s seed, so without jitter a server restart puts
+ * thousands of clients on identical reconnect schedules — a thundering herd that retriggers
+ * the outage it is recovering from. Jitter is applied to the *wait*, not the ceiling, so the
+ * exponential growth and 30s cap are unchanged.
+ */
+private fun jitter(ms: Long): Long = (ms * (0.6 + Random.nextDouble(0.8))).toLong().coerceAtLeast(1)
 
     private fun watchPresence() {
         presenceSubscription?.cancel()
@@ -563,7 +555,7 @@ class AppState(
                 } catch (_: Exception) {
                     // A stale presence dot is not worth an error banner.
                 }
-                delay(backoff)
+                delay(jitter(backoff))
                 backoff = (backoff * 2).coerceAtMost(30_000L)
             }
         }
@@ -599,6 +591,23 @@ class AppState(
         themePrimary = s.themePrimary
         themeSecondary = s.themeSecondary
         themeDark = s.themeDark
+        enterToSend = s.enterToSend ?: true
+    }
+
+    /**
+     * Enter-to-send, synced per account. Terminal/IRC-lineage users flip this so Enter
+     * makes a newline and Shift+Enter sends.
+     */
+    var enterToSend by mutableStateOf(true)
+        private set
+
+    fun updateEnterToSend(enabled: Boolean) = run {
+        applySettings(
+            client.execute<UpdateSettingsData>(
+                Operations.UPDATE_SETTINGS,
+                buildJsonObject { put("input", buildJsonObject { put("enterToSend", enabled) }) },
+            ).settings
+        )
     }
 
     fun setLayout(layout: String) = run {
@@ -697,13 +706,23 @@ class AppState(
                     },
                 ).slot
 
-                uploadProgress = 0.3f
-                if (!client.putBytes(slot.uploadUrl, file.bytes, file.contentType)) {
+                uploadProgress = 0.05f
+                if (!client.putBytes(
+                        slot.uploadUrl,
+                        file.bytes,
+                        file.contentType,
+                        onUpload = { sent, total ->
+                            if (total > 0) {
+                                uploadProgress = 0.10f + 0.70f * (sent.toFloat() / total)
+                            }
+                        },
+                    )
+                ) {
                     error = "Upload failed. Check the storage service is running."
                     return@launch
                 }
 
-                uploadProgress = 0.8f
+                uploadProgress = 0.90f
                 client.execute<FinalizeUploadData>(
                     Operations.FINALIZE_UPLOAD,
                     buildJsonObject { put("attachmentId", slot.attachment.id) },
@@ -734,7 +753,6 @@ class AppState(
         typingSubscription?.cancel()
         presenceSubscription?.cancel()
         notificationSubscription?.cancel()
-        heartbeatJob?.cancel()
         clearTyping()
 
         val token = refreshToken
@@ -755,6 +773,8 @@ class AppState(
         clearSecret(REFRESH_TOKEN_KEY)
         channels.clear()
         messages.clear()
+        messageIds.clear()
+        oldestLoadedId = null
         guilds.clear()
         stories.clear()
         lastMessages.clear()
@@ -826,16 +846,15 @@ class AppState(
                 put("limit", 50)
             }
             // The server returns newest-first for cursor pagination; the UI reads oldest-first.
-            val page = client.execute<MessagesData>(Operations.MESSAGES, vars).messages.nodes.reversed()
-            messages.clear()
-            messages.addAll(page)
+            val result = client.execute<MessagesData>(Operations.MESSAGES, vars).messages
+            replaceMessages(result.nodes.reversed(), hasMore = result.hasMore)
 
             // Advance the server-side read cursor to the newest message we're rendering.
             // Fire-and-forget with the page's newest id: the point is "everything on screen
             // has been seen", and the page we just fetched IS everything on screen. Best
             // effort — a failed cursor write costs a stale unread count elsewhere, never
             // a broken screen.
-            page.lastOrNull()?.let { newest ->
+            messages.lastOrNull()?.let { newest ->
                 scope.launch {
                     runCatching {
                         client.execute<MarkReadData>(
@@ -966,6 +985,8 @@ class AppState(
     fun closeChannel() {
         selectedChannel = null
         messages.clear()
+        messageIds.clear()
+        oldestLoadedId = null
         channelMembers.clear()
         subscription?.cancel()
         typingSubscription?.cancel()
@@ -977,13 +998,111 @@ class AppState(
         selectedChannel = channel
         unread.remove(channel.id)
         mentionCounts.remove(channel.id)
-        val page = client.execute<MessagesData>(
+        val result = client.execute<MessagesData>(
             Operations.MESSAGES,
             buildJsonObject { put("channelId", channel.id); put("limit", 50) },
-        ).messages.nodes.reversed()
+        ).messages
+        replaceMessages(result.nodes.reversed(), hasMore = result.hasMore)
+        watch(channel.id)
+    }
+
+    /**
+     * Swaps the whole loaded window for a fresh page, id set and all.
+     *
+     * The one door for "the channel changed" — open, reopen, refresh — so the list and its
+     * dedupe set can never fall out of step.
+     */
+    private fun replaceMessages(page: List<MessageDto>, hasMore: Boolean = false) {
         messages.clear()
         messages.addAll(page)
-        watch(channel.id)
+        messageIds.clear()
+        messageIds.addAll(page.map { it.id })
+        oldestLoadedId = page.firstOrNull()?.id
+        hasOlder = hasMore
+    }
+
+    /** Oldest message id in the loaded window; null while nothing is loaded. Scroll-up
+     *  pagination's cursor, and the "is there older history" check. */
+    private var oldestLoadedId: String? = null
+
+    /** True while an older page is in flight, so the UI doesn't double-fire on scroll. */
+    var loadingOlder by mutableStateOf(false)
+        private set
+
+    /** Whether the server has older history past the loaded window. */
+    var hasOlder by mutableStateOf(false)
+        private set
+
+    /**
+     * Loads one older page and prepends it. Suspend — the caller (the scroll watcher) pins
+     * the scroll position around the call, which only works if the call returns *after* the
+     * prepend has landed.
+     *
+     * The server pages newest-first from a cursor; we hold oldest-first for rendering, so the
+     * page comes back reversed and lands at the front. The id set absorbs duplicates at the
+     * seam (a message racing the fetch) for free.
+     *
+     * The window is capped at [MAX_WINDOW]: anything older than the cap is dropped off the
+     * *end* once the prepend lands, so RAM is bounded no matter how far back someone scrolls.
+     * Dropping from the end, not the front, matters — the newest messages are the ones the
+     * subscription is actively updating.
+     */
+    suspend fun loadOlder() {
+        val channel = selectedChannel ?: return
+        val cursor = oldestLoadedId ?: return
+        if (loadingOlder) return
+        loadingOlder = true
+        try {
+            val result = client.execute<MessagesData>(
+                Operations.MESSAGES,
+                buildJsonObject {
+                    put("channelId", channel.id)
+                    put("before", cursor)
+                    put("limit", 50)
+                },
+            ).messages
+            val page = result.nodes.reversed()
+            page.forEach { if (messageIds.add(it.id)) messages.add(0, it) }
+            oldestLoadedId = page.firstOrNull()?.id ?: cursor
+            hasOlder = result.hasMore
+
+            // Cap the window from the end: history before the newest MAX_WINDOW rows
+            // is evicted; scrolling back down re-fetches it the same way.
+            if (messages.size > MAX_WINDOW) {
+                val excess = messages.size - MAX_WINDOW
+                val dropped = messages.subList(messages.size - excess, messages.size).map { it.id }
+                messages.subList(messages.size - excess, messages.size).clear()
+                dropped.forEach(messageIds::remove)
+            }
+        } catch (_: Exception) {
+            // A failed history fetch leaves the current window untouched — history is
+            // still browsable by retry, and the live conversation is unaffected.
+            hasOlder = true
+        } finally {
+            loadingOlder = false
+        }
+    }
+
+    /**
+     * Loads older pages until a message from [targetDay] ("YYYY-MM-DD") is in the window, or
+     * history runs out. Returns the id of the first message of that day when found — the
+     * caller (which owns the list state) scrolls to it.
+     *
+     * Backs the day-divider jump gesture. Bounded to [MAX_JUMP_PAGES] so a stray
+     * double-click can't walk back months — nobody wants that on an accidental gesture.
+     */
+    suspend fun loadUntilDay(targetDay: String): String? {
+        val dayOf = { iso: String -> iso.substringBefore('T') }
+        repeat(MAX_JUMP_PAGES) {
+            val first = messages.firstOrNull() ?: return null
+            if (dayOf(first.createdAt) <= targetDay) {
+                return messages.firstOrNull { dayOf(it.createdAt) == targetDay }?.id
+                    ?: messages.firstOrNull { dayOf(it.createdAt) > targetDay }?.id
+            }
+            if (!hasOlder) return null
+            loadOlder()
+        }
+        return null
     }
 
     fun send(text: String) {
@@ -1031,7 +1150,7 @@ class AppState(
                 // and retry with the same nonce — which is exactly what the server treats as
                 // a retry of a possibly-lost send rather than a new message.
                 markPendingFailed(nonce)
-                showSnackbar("Couldn't send. Tap to retry.", actionLabel = "Retry") {
+                showSnackbar("Couldn't send.", actionLabel = "Retry") {
                     retrySend(channel, nonce)
                 }
             }
@@ -1045,6 +1164,7 @@ class AppState(
     private fun removePending(nonce: String) {
         val id = "pending:$nonce"
         messages.removeAll { it.id == id }
+        messageIds.remove(id)
         pendingSends.remove(nonce)
         failedSends.remove(nonce)
     }
@@ -1086,6 +1206,22 @@ class AppState(
         val channel = selectedChannel ?: return
         val nonce = message.id.removePrefix("pending:")
         if (message.id.startsWith("pending:")) retrySend(channel, nonce)
+    }
+
+    /**
+     * The text of a failed placeholder, for loading back into the composer — the "edit before
+     * retrying" path. Returns null when the id isn't a failed send.
+     */
+    fun failedDraftOf(messageId: String): String? =
+        if (messageId.startsWith("pending:")) failedSends[messageId.removePrefix("pending:")] else null
+
+    /**
+     * Drops a failed placeholder without sending it — the discard half of "edit instead of
+     * retry": the text goes back to the composer, so the row it came from must go.
+     */
+    fun discardFailed(messageId: String) {
+        if (!messageId.startsWith("pending:")) return
+        removePending(messageId.removePrefix("pending:"))
     }
 
     // -- Edit, delete, pin ---------------------------------------------------
@@ -1138,7 +1274,10 @@ class AppState(
                 // The subscription echo removes it; doing it here too makes the removal
                 // immediate on the machine that asked, rather than one round trip later.
                 val live = messages.indexOfFirst { it.id == messageId }
-                if (live != -1) messages.removeAt(live)
+                if (live != -1) {
+                    messages.removeAt(live)
+                    messageIds.remove(messageId)
+                }
             } catch (e: Exception) {
                 showSnackbar(describe(e))
             }
@@ -1217,6 +1356,7 @@ class AppState(
         subscription?.cancel()
         subscription = scope.launch {
             var backoff = 1_000L
+            var connectedOnce = false
             while (true) {
                 try {
                     client.subscribe(
@@ -1238,7 +1378,23 @@ class AppState(
                 } catch (e: Exception) {
                     error = "Reconnecting… (${describe(e)})"
                 }
-                delay(backoff)
+                // The full resume protocol (sequence numbers, gateway replay) is still phase 2;
+                // until then this closes the gap the cheap way: after any drop, refetch the
+                // newest page and merge. `appendIfNew` dedupes on snowflake id, so messages
+                // already on screen cost nothing and anything the missed socket would have
+                // delivered lands now. Only while the channel is still the open one — a slow
+                // reconnect must not dump channel A's history into channel B.
+                if (connectedOnce && channelId == selectedChannel?.id) {
+                    runCatching {
+                        val fresh = client.execute<MessagesData>(
+                            Operations.MESSAGES,
+                            buildJsonObject { put("channelId", channelId); put("limit", 50) },
+                        ).messages.nodes
+                        fresh.forEach { if (it.channelId == selectedChannel?.id) appendIfNew(it) }
+                    }
+                }
+                connectedOnce = true
+                delay(jitter(backoff))
                 backoff = (backoff * 2).coerceAtMost(30_000L)
             }
         }
@@ -1272,7 +1428,7 @@ class AppState(
                 } catch (_: Exception) {
                     // Same policy as typing: a stale chip is not worth a banner.
                 }
-                delay(backoff)
+                delay(jitter(backoff))
                 backoff = (backoff * 2).coerceAtMost(30_000L)
             }
         }
@@ -1323,7 +1479,7 @@ class AppState(
                 } catch (_: Exception) {
                     // Same policy as reactions.
                 }
-                delay(backoff)
+                delay(jitter(backoff))
                 backoff = (backoff * 2).coerceAtMost(30_000L)
             }
         }
@@ -1339,7 +1495,10 @@ class AppState(
     private fun applyMessageUpdate(event: MessageUpdateEventDto) {
         val index = messages.indexOfFirst { it.id == event.message.id }
         if (event.deleted) {
-            if (index != -1) messages.removeAt(index)
+            if (index != -1) {
+                messages.removeAt(index)
+                messageIds.remove(event.message.id)
+            }
             pinnedIds.remove(event.message.id)
             if (lastMessages[event.message.channelId]?.id == event.message.id) {
                 lastMessages.remove(event.message.channelId)
@@ -1466,7 +1625,7 @@ class AppState(
                 } catch (_: Exception) {
                     // Silent: a missing typing indicator is not worth a banner.
                 }
-                delay(backoff)
+                delay(jitter(backoff))
                 backoff = (backoff * 2).coerceAtMost(30_000L)
             }
         }
@@ -1504,14 +1663,27 @@ class AppState(
                     },
                 ).slot
 
-                uploadProgress = 0.15f
-                if (!client.putBytes(slot.uploadUrl, file.bytes, file.contentType)) {
+                uploadProgress = 0.05f
+                if (!client.putBytes(
+                        slot.uploadUrl,
+                        file.bytes,
+                        file.contentType,
+                        // Real determinate progress across the PUT itself — the phase the
+                        // upload actually spends its time in. Mapped into the 10–80% band so
+                        // the sign/finalize round trips still have somewhere to be.
+                        onUpload = { sent, total ->
+                            if (total > 0) {
+                                uploadProgress = 0.10f + 0.70f * (sent.toFloat() / total)
+                            }
+                        },
+                    )
+                ) {
                     error = "Upload failed. Check the storage service is running."
                     uploadProgress = null
                     return@launch
                 }
 
-                uploadProgress = 0.75f
+                uploadProgress = 0.90f
                 val ready = client.execute<FinalizeUploadData>(
                     Operations.FINALIZE_UPLOAD,
                     buildJsonObject { put("attachmentId", slot.attachment.id) },
@@ -1564,13 +1736,23 @@ class AppState(
                     },
                 ).slot
 
-                uploadProgress = 0.15f
-                if (!client.putBytes(slot.uploadUrl, audio.bytes, audio.mimeType)) {
+                uploadProgress = 0.05f
+                if (!client.putBytes(
+                        slot.uploadUrl,
+                        audio.bytes,
+                        audio.mimeType,
+                        onUpload = { sent, total ->
+                            if (total > 0) {
+                                uploadProgress = 0.10f + 0.70f * (sent.toFloat() / total)
+                            }
+                        },
+                    )
+                ) {
                     error = "Upload failed. Check the storage service is running."
                     return@launch
                 }
 
-                uploadProgress = 0.75f
+                uploadProgress = 0.90f
                 val ready = client.execute<FinalizeUploadData>(
                     Operations.FINALIZE_UPLOAD,
                     buildJsonObject {
@@ -1681,13 +1863,23 @@ class AppState(
                         },
                     ).slot
 
-                    uploadProgress = 0.3f
-                    if (!client.putBytes(slot.uploadUrl, file.bytes, file.contentType)) {
+                    uploadProgress = 0.05f
+                    if (!client.putBytes(
+                            slot.uploadUrl,
+                            file.bytes,
+                            file.contentType,
+                            onUpload = { sent, total ->
+                                if (total > 0) {
+                                    uploadProgress = 0.10f + 0.70f * (sent.toFloat() / total)
+                                }
+                            },
+                        )
+                    ) {
                         error = "Upload failed. Check the storage service is running."
                         return@launch
                     }
 
-                    uploadProgress = 0.8f
+                    uploadProgress = 0.90f
                     client.execute<FinalizeUploadData>(
                         Operations.FINALIZE_UPLOAD,
                         buildJsonObject { put("attachmentId", slot.attachment.id) },
@@ -1960,6 +2152,8 @@ class AppState(
         selectedGuild = guild
         selectedChannel = null
         messages.clear()
+        messageIds.clear()
+        oldestLoadedId = null
         channelMembers.clear()
         subscription?.cancel()
         typingSubscription?.cancel()
@@ -2049,13 +2243,23 @@ class AppState(
                     },
                 ).slot
 
-                uploadProgress = 0.3f
-                if (!client.putBytes(slot.uploadUrl, file.bytes, file.contentType)) {
+                uploadProgress = 0.05f
+                if (!client.putBytes(
+                        slot.uploadUrl,
+                        file.bytes,
+                        file.contentType,
+                        onUpload = { sent, total ->
+                            if (total > 0) {
+                                uploadProgress = 0.10f + 0.70f * (sent.toFloat() / total)
+                            }
+                        },
+                    )
+                ) {
                     error = "Upload failed. Check the storage service is running."
                     return@launch
                 }
 
-                uploadProgress = 0.8f
+                uploadProgress = 0.90f
                 client.execute<FinalizeUploadData>(
                     Operations.FINALIZE_UPLOAD,
                     buildJsonObject { put("attachmentId", slot.attachment.id) },
@@ -2339,7 +2543,7 @@ class AppState(
                     // Silent. A dropped notification socket must not put a red banner over a
                     // conversation that is working perfectly well on its own subscription.
                 }
-                delay(backoff)
+                delay(jitter(backoff))
                 backoff = (backoff * 2).coerceAtMost(30_000L)
             }
         }
@@ -2473,7 +2677,16 @@ class AppState(
         )
     }
 
-    /** Snowflakes are unique, so id equality is the whole dedup story. */
+    /** Snowflakes are unique, so id equality is the whole dedup story.
+     *
+     * Backed by a HashSet rather than `messages.none { … }`: the list scan made every inbound
+     * message O(n) over the whole loaded history, and with grouping re-derived per change the
+     * render path was O(n²) across a session. The set is maintained alongside the list at
+     * every mutation site that adds or removes — the list stays the render source of truth,
+     * the set answers "have I seen this id" in O(1).
+     */
+    private val messageIds = mutableSetOf<String>()
+
     private fun appendIfNew(message: MessageDto) {
         // Sending is the clearest possible signal that someone stopped typing — drop their
         // indicator now rather than leaving it up for the rest of the timeout.
@@ -2481,7 +2694,7 @@ class AppState(
         typingUsers.remove(message.author.id)
 
         noteActivity(message)
-        if (messages.none { it.id == message.id }) messages.add(message)
+        if (messageIds.add(message.id)) messages.add(message)
     }
 
     fun dismissError() { error = null }
@@ -2556,8 +2769,12 @@ class AppState(
          *  so a steady typist never flickers. */
         const val TYPING_TTL_MS = 7_000L
 
-        /** Comfortably inside the server's 60s presence timeout, with room for one to be lost. */
-        const val HEARTBEAT_MS = 25_000L
+        /** The rendered message window's cap. ~250 rows is several screens of chat; beyond
+         *  it, older rows are evicted from the end rather than accumulated forever. */
+        const val MAX_WINDOW = 250
+
+        /** The most pages the day-jump will load in one gesture. */
+        const val MAX_JUMP_PAGES = 6
     }
 }
 

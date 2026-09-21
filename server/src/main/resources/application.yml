@@ -26,7 +26,11 @@ spring:
   graphql:
     path: /graphql
     graphiql:
-      enabled: ${GRAPHIQL_ENABLED:true}   # turn this off outside development
+      # Off by default. A dev-profile override (application-dev.yml) turns it back on for
+      # local work — the same allowlist SecretGuard uses — so a forgotten flag on a real
+      # deployment doesn't expose a schema browser + anonymous query console. Set
+      # GRAPHIQL_ENABLED=true to override either way.
+      enabled: ${GRAPHIQL_ENABLED:false}
       path: /graphiql
     websocket:
       path: /graphql
@@ -46,6 +50,11 @@ singular:
   # MUST be unique per running instance, 0-1023. Two nodes sharing an id will mint duplicate
   # snowflakes, which corrupts primary keys silently.
   node-id: ${SINGULAR_NODE_ID:1}
+
+  # Trust X-Forwarded-For / X-Real-IP as the client's real address. Enable ONLY behind a reverse
+  # proxy that OVERWRITES those headers. Leave false otherwise: it is the fail-safe direction
+  # (an exposed server then keys rate limits on the unspoofable socket address).
+  trust-proxy: ${SINGULAR_TRUST_PROXY:false}
 
   auth:
     # HMAC key for stateless access tokens. Replace before any deployment.
@@ -98,6 +107,7 @@ singular:
   media:
     max-upload-bytes: ${MEDIA_MAX_BYTES:104857600}   # 100 MiB
     max-image-bytes: ${MEDIA_MAX_IMAGE_BYTES:26214400}
+    max-image-edge: ${MEDIA_MAX_IMAGE_EDGE:8192}    # decompression-bomb guard, in pixels
     thumbnail-max-edge: 320
     story-ttl: PT24H
 

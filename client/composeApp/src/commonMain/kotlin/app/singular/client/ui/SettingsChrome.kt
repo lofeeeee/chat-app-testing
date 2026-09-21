@@ -1,6 +1,7 @@
 package app.singular.client.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -43,6 +45,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import app.singular.client.platform.PickedFile
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /**
  * The chrome shared by the settings screens.
@@ -145,7 +148,12 @@ fun <T> SettingsNav(
  * while its contents stay a readable measure.
  */
 @Composable
-fun SettingsPane(title: String, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+fun SettingsPane(
+    title: String,
+    modifier: Modifier = Modifier,
+    trailing: (@Composable () -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
     Column(
         modifier
             .fillMaxSize()
@@ -153,8 +161,48 @@ fun SettingsPane(title: String, modifier: Modifier = Modifier, content: @Composa
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.headlineSmall)
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            trailing?.invoke()
+        }
         content()
+    }
+}
+
+/**
+ * Close button with an "ESC" pill affordance, styled in the design system.
+ */
+@Composable
+fun CloseEscButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val colors = LocalSingularColors.current
+    Row(
+        modifier = modifier
+            .clip(SingularShapes.small)
+            .border(1.dp, colors.line, SingularShapes.small)
+            .background(colors.sunken)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            Icons.Filled.Close,
+            contentDescription = "Close",
+            tint = colors.textMuted,
+            modifier = Modifier.size(14.dp),
+        )
+        Text(
+            "ESC",
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp,
+            ),
+            color = colors.textMuted,
+        )
     }
 }
 

@@ -1,18 +1,27 @@
 package app.singular.client
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Surface
@@ -28,35 +37,38 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.unit.dp
 import app.singular.client.net.SingularClient
 import app.singular.client.ui.BackDispatcher
-import app.singular.client.ui.LocalBackDispatcher
-import app.singular.client.ui.LocalReducedMotion
-import app.singular.client.ui.Route
-import app.singular.client.ui.SystemBackHandler
-import app.singular.client.ui.buildImageLoader
 import app.singular.client.ui.ChatScreen
 import app.singular.client.ui.ImageViewerHost
 import app.singular.client.ui.KeyboardScope
-import app.singular.client.ui.ProvideWindowSize
-import app.singular.client.ui.ShortcutsDialog
-import app.singular.client.ui.StoryEditor
-import app.singular.client.ui.handleGlobalShortcut
-import app.singular.client.ui.isPress
-import coil3.SingletonImageLoader
-import coil3.compose.LocalPlatformContext
+import app.singular.client.ui.LocalBackDispatcher
+import app.singular.client.ui.LocalReducedMotion
+import app.singular.client.ui.LocalSingularColors
 import app.singular.client.ui.LoginScreen
 import app.singular.client.ui.MentionsScreen
+import app.singular.client.ui.Presets
+import app.singular.client.ui.ProvideWindowSize
+import app.singular.client.ui.Route
 import app.singular.client.ui.ServerSettingsScreen
 import app.singular.client.ui.ServerSettingsSection
 import app.singular.client.ui.SessionsScreen
 import app.singular.client.ui.SettingsScreen
-import app.singular.client.ui.StoriesScreen
+import app.singular.client.ui.ShortcutsDialog
 import app.singular.client.ui.SingularTheme
-import app.singular.client.ui.Presets
+import app.singular.client.ui.StoriesScreen
+import app.singular.client.ui.StoryEditor
+import app.singular.client.ui.SystemBackHandler
 import app.singular.client.ui.VoiceNotePlayer
+import app.singular.client.ui.buildImageLoader
+import app.singular.client.ui.handleGlobalShortcut
+import app.singular.client.ui.isPress
+import coil3.SingletonImageLoader
+import coil3.compose.LocalPlatformContext
 
 @Composable
 fun App(
@@ -105,6 +117,9 @@ fun App(
     /** The shortcuts sheet is a dialog, not a destination — it overlays any screen. */
     var showShortcuts by remember { mutableStateOf(false) }
 
+    /** Settings is a modal overlay with frosted backdrop rather than a full-window route. */
+    var showSettings by remember { mutableStateOf(false) }
+
     // -1 = going deeper (new screen slides in from the right), +1 = going back (the old one
     // slides out to the right). Set before the stack mutates so the transition reads the
     // direction of travel rather than inferring it from stale state.
@@ -116,6 +131,10 @@ fun App(
      * another Settings.
      */
     fun go(route: Route) {
+        if (route == Route.Settings) {
+            showSettings = true
+            return
+        }
         navDirection = if (backStack.size > 1 && backStack.last() == route) 1 else -1
         backStack.remove(route)
         backStack.add(route)
@@ -123,6 +142,10 @@ fun App(
 
     /** The Ctrl-chords toggle: pressing the one for the screen you're on closes it. */
     fun toggle(route: Route) {
+        if (route == Route.Settings) {
+            showSettings = !showSettings
+            return
+        }
         if (backStack.size > 1 && backStack.last() == route) {
             navDirection = 1
             backStack.removeAt(backStack.lastIndex)
@@ -169,6 +192,7 @@ fun App(
         when {
             backDispatcher.dispatch() -> true
             showShortcuts -> { showShortcuts = false; true }
+            showSettings -> { showSettings = false; true }
             backStack.size > 1 -> {
                 navDirection = 1
                 backStack.removeAt(backStack.lastIndex)
@@ -248,7 +272,7 @@ fun App(
             // when there's something to consume — otherwise the system default (leaving the
             // app) applies.
             SystemBackHandler(
-                enabled = backStack.size > 1 || showShortcuts,
+                enabled = backStack.size > 1 || showShortcuts || showSettings,
                 onBack = { goBack() },
             )
 
@@ -258,7 +282,7 @@ fun App(
             KeyboardScope(
                 // Which screen is showing. Changing it re-takes keyboard focus, so Escape
                 // keeps working after navigating to a screen that has nothing focusable on it.
-                refocusKey = backStack.last(),
+                refocusKey = backStack.last() to showSettings,
                 onPreviewKey = { event ->
                     when {
                         event.isPress && event.key == Key.Escape -> goBack()
@@ -274,65 +298,104 @@ fun App(
                     }
                 }
             ) {
-                // Only the top of the stack is drawn — screens can't stack invisibly. The
-                // transition is a short slide-and-fade: going deeper slides the new screen in
-                // from the right; going back reverses it. Reduced motion snaps instead.
-                // (The flag is read here, outside the spec — a transitionSpec lambda is not a
-                // composable context, so it can only capture, not read composition locals.)
+                val colors = LocalSingularColors.current
                 val reducedMotion = LocalReducedMotion.current
-                AnimatedContent(
-                    targetState = backStack.last(),
-                    transitionSpec = {
-                        if (reducedMotion) {
-                            fadeIn(snap()) togetherWith fadeOut(snap())
-                        } else if (navDirection < 0) {
-                            (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 14 }) togetherWith
-                                (fadeOut(tween(140)))
-                        } else {
-                            (fadeIn(tween(180))) togetherWith
-                                (fadeOut(tween(140)) + slideOutHorizontally(tween(220)) { it / 14 })
-                        }
-                    },
-                    label = "route",
-                ) { route ->
-                    when (route) {
-                        Route.Chat -> ChatScreen(
-                            state,
-                            onOpenSessions = { go(Route.Sessions) },
-                            onOpenSettings = { go(Route.Settings) },
-                            onOpenStories = { go(Route.Stories) },
-                            onOpenMentions = { go(Route.Mentions) },
-                            onOpenServerSettings = ::openServerSettings,
-                        )
 
-                        Route.Settings -> SettingsScreen(state, onClose = { popRoute() })
-                        Route.Stories -> StoriesScreen(
-                            state,
-                            onCompose = { go(Route.StoryEditor) },
-                            onClose = { popRoute() },
-                        )
-                        Route.Mentions -> MentionsScreen(state, onClose = { popRoute() })
-                        Route.Sessions -> SessionsScreen(sessions, onClose = { popRoute() })
-                        Route.StoryEditor -> StoryEditor(state, onClose = { popRoute() })
+                val blurRadius by animateDpAsState(
+                    targetValue = if (showSettings) 20.dp else 0.dp,
+                    animationSpec = if (reducedMotion) snap() else tween(if (showSettings) 220 else 160),
+                    label = "settings-blur",
+                )
+                val scrimAlpha by animateFloatAsState(
+                    targetValue = if (showSettings) 0.52f else 0f,
+                    animationSpec = if (reducedMotion) snap() else tween(if (showSettings) 220 else 160),
+                    label = "settings-scrim",
+                )
 
-                        is Route.ServerSettings -> {
-                            // Resolved per composition: `loadGuilds()` replaces the DTOs, so
-                            // holding one would show stale data after the first save. A guild
-                            // that vanished from the list — left, kicked — drops the stale
-                            // route and lands on the chat, which is where you are.
-                            val guild = state.guilds.firstOrNull { it.id == route.guildId }
-                            if (guild != null) {
-                                ServerSettingsScreen(
-                                    state = state,
-                                    guild = guild,
-                                    initialSection = route.section,
-                                    onClose = { popRoute() },
-                                )
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .then(
+                            if (blurRadius > 0.dp && !reducedMotion) Modifier.blur(blurRadius)
+                            else Modifier
+                        )
+                ) {
+                    // Only the top of the stack is drawn — screens can't stack invisibly. The
+                    // transition is a short slide-and-fade: going deeper slides the new screen in
+                    // from the right; going back reverses it. Reduced motion snaps instead.
+                    AnimatedContent(
+                        targetState = backStack.last(),
+                        transitionSpec = {
+                            if (reducedMotion) {
+                                fadeIn(snap()) togetherWith fadeOut(snap())
+                            } else if (navDirection < 0) {
+                                (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 14 }) togetherWith
+                                    (fadeOut(tween(140)))
                             } else {
-                                LaunchedEffect(route) { backStack.remove(route) }
+                                (fadeIn(tween(180))) togetherWith
+                                    (fadeOut(tween(140)) + slideOutHorizontally(tween(220)) { it / 14 })
+                            }
+                        },
+                        label = "route",
+                    ) { route ->
+                        when (route) {
+                            Route.Chat -> ChatScreen(
+                                state,
+                                onOpenSessions = { go(Route.Sessions) },
+                                onOpenSettings = { showSettings = true },
+                                onOpenStories = { go(Route.Stories) },
+                                onOpenMentions = { go(Route.Mentions) },
+                                onOpenServerSettings = ::openServerSettings,
+                            )
+
+                            Route.Settings -> SettingsScreen(state, onClose = { popRoute() })
+                            Route.Stories -> StoriesScreen(
+                                state,
+                                onCompose = { go(Route.StoryEditor) },
+                                onClose = { popRoute() },
+                            )
+                            Route.Mentions -> MentionsScreen(state, onClose = { popRoute() })
+                            Route.Sessions -> SessionsScreen(sessions, onClose = { popRoute() })
+                            Route.StoryEditor -> StoryEditor(state, onClose = { popRoute() })
+
+                            is Route.ServerSettings -> {
+                                // Resolved per composition: `loadGuilds()` replaces the DTOs, so
+                                // holding one would show stale data after the first save. A guild
+                                // that vanished from the list — left, kicked — drops the stale
+                                // route and lands on the chat, which is where you are.
+                                val guild = state.guilds.firstOrNull { it.id == route.guildId }
+                                if (guild != null) {
+                                    ServerSettingsScreen(
+                                        state = state,
+                                        guild = guild,
+                                        initialSection = route.section,
+                                        onClose = { popRoute() },
+                                    )
+                                } else {
+                                    LaunchedEffect(route) { backStack.remove(route) }
+                                }
                             }
                         }
                     }
+                }
+
+                // Scrim overlay behind the modal
+                if (scrimAlpha > 0f) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(colors.canvas.copy(alpha = scrimAlpha))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { showSettings = false },
+                            )
+                    )
+                }
+
+                // Settings modal overlay
+                if (showSettings) {
+                    SettingsScreen(state, onClose = { showSettings = false })
                 }
 
                 // In-app transient messages, docked at the bottom edge. The host lives here so

@@ -87,12 +87,14 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.ui.input.key.Key
 import kotlinx.coroutines.launch
+import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -173,6 +175,21 @@ fun ChatScreen(
             when {
                 event.isPress && event.key == Key.Escape && state.selectedChannel != null -> {
                     state.closeChannel(); true
+                }
+                // Type-anywhere → composer (the chat-client convention): a plain printable
+                // keystroke with no Ctrl/Cmd/Alt chord puts the composer in focus and — by
+                // returning false — lets this same event propagate into the now-focused
+                // field, so the character the user pressed lands in the message box.
+                // Pressing "h" types an "h", not just focuses.
+                //
+                // Shift is allowed through: Shift+letter is how capitals are typed, and the
+                // picker's Shift-to-keep-open modifier only matters while the picker holds
+                // the clicks — a key event while the popup is up still belongs to the draft
+                // field the popup is anchored to.
+                event.isPress && state.selectedChannel != null && !event.isCommand &&
+                    !event.isAltPressed && event.key.isPlainTypingKey() -> {
+                    runCatching { composerFocus.requestFocus() }
+                    false
                 }
                 handleNavigationShortcut(
                     event,
@@ -980,17 +997,62 @@ private fun Conversation(
     /** True when this pane replaced the sidebar, so it must offer a way back to it. */
     showBack: Boolean = false,
 ) {
-    // Drafts are kept per channel: one shared `remember` meant switching chats carried the
-    // half-written message into the wrong conversation, and a bare `remember(channel.id)`
-    // meant leaving and returning threw it away. The map gives each channel its own draft for
-    // as long as this screen is alive.
+    // Drafts are kept per channel and PERSISTED across restarts: one shared `remember` meant
+    // switching chats carried the half-written message into the wrong conversation, and a
+    // screen-lifetime map meant a crash or relaunch threw away what you were typing. The
+    // map still lives here (instant reads); a debounced job mirrors it to local storage so
+    // the next launch restores every half-written message.
+    //
+    // One key per channel, capped: an account in dozens of servers doesn't need last
+    // year's drafts, and unbounded growth in local storage is how an app rots.
     val drafts = remember { mutableStateMapOf<String, String>() }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+
+    // Mirror drafts to local storage, debounced: a write per keystroke would burn the flash
+    // for nothing — half a second after typing stops is equally durable for a draft. Blank
+    // drafts ARE written (as empty strings) so sending a message erases its stored draft;
+    // the restore side filters blanks out.
+    // Channels whose drafts were actually edited this session (versus merely seeded).
+    val touchedChannels = remember { mutableStateMapOf<String, Boolean>() }
+
+    var draftWriteJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    fun persistDrafts() {
+        draftWriteJob?.cancel()
+        draftWriteJob = scope.launch {
+            kotlinx.coroutines.delay(500)
+            drafts.entries
+                // Channels the user actually touched this session — a map full of
+                // never-typed defaults would erase drafts from other sessions.
+                .filter { it.key in touchedChannels }
+                .take(20)
+                .forEach { (channelId, text) ->
+                    app.singular.client.platform.writeLocalString("draft:$channelId", text)
+                }
+        }
+    }
+
+    // Seed once from storage, across every channel the client knows — DMs and guilds both.
+    // Best-effort: an unreadable store means starting from nothing, like a fresh install.
+    LaunchedEffect(state.channels.size, state.guilds.size) {
+        (state.channels.asSequence() + state.guilds.asSequence().flatMap { it.channels.asSequence() })
+            .filter { it.id !in drafts || drafts[it.id].isNullOrBlank() }
+            .forEach { channel ->
+                app.singular.client.platform.readLocalString("draft:${channel.id}")?.let { saved ->
+                    if (saved.isNotBlank()) drafts[channel.id] = saved
+                }
+            }
+    }
+
     val channel = state.selectedChannel ?: return
     val other = channel.members.firstOrNull { it.id != state.currentUser?.id }
     var draft by remember(channel.id) { mutableStateOf(drafts[channel.id].orEmpty()) }
-    LaunchedEffect(channel.id, draft) { drafts[channel.id] = draft }
+    LaunchedEffect(channel.id, draft) {
+        drafts[channel.id] = draft
+        touchedChannels[channel.id] = true
+        persistDrafts()
+    }
 
     // @-autocomplete state. The token is recomputed from the draft on every change; the
     // popup is shown exactly while a token is active and something matches it.
@@ -1083,6 +1145,31 @@ private fun Conversation(
             lastVisible >= state.messages.lastIndex - 2
         }
     }
+
+    // Scroll-up pagination: near the top, fetch the older page. `derivedStateOf` so this only
+    // recomputes when the *predicate* flips, not on every scroll pixel. The pin captures the
+    // pre-load indices from inside the effect, which runs while the list still shows the old
+    // content — a prepend lands page-size many items above the reader, and without the pin
+    // item 0 becoming item 50 would snap the view to the top of the new page.
+    val nearTop by remember {
+        derivedStateOf {
+            val first = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: 0
+            first <= 3
+        }
+    }
+    LaunchedEffect(nearTop, state.hasOlder, channel.id) {
+        if (nearTop && state.hasOlder && !state.loadingOlder && state.messages.isNotEmpty()) {
+            val previousFirst = listState.firstVisibleItemIndex
+            val previousOffset = listState.firstVisibleItemScrollOffset
+            val before = state.messages.size
+            state.loadOlder()
+            // loadOlder returns with the prepend landed — restore where the reader was,
+            // translated page-size deeper into the list.
+            val added = state.messages.size - before
+            if (added > 0) listState.scrollToItem(previousFirst + added, previousOffset)
+        }
+    }
+
     var unseenBelow by remember(channel.id) { mutableStateOf(0) }
     val lastSeenSize = remember(channel.id) { mutableStateOf(0) }
 
@@ -1234,6 +1321,25 @@ private fun Conversation(
                         // The snackbar owns the retry prompt; tapping a failed message is a
                         // shortcut to the same place.
                         state.retryFailed(message)
+                    },
+                    onEditFailed = { message ->
+                        // Edit-instead-of-retry: the failed text goes back to the composer
+                        // and the placeholder goes away — the user is rewriting this send,
+                        // not re-issuing it.
+                        state.failedDraftOf(message.id)?.let { failedText ->
+                            state.discardFailed(message.id)
+                            editingMessage = null
+                            draft = failedText
+                            runCatching { composerFocus.requestFocus() }
+                        }
+                    },
+                    onJumpToDay = { targetDay ->
+                        scope.launch {
+                            state.loadUntilDay(targetDay)?.let { firstOfDay ->
+                                val index = state.messages.indexOfFirst { it.id == firstOfDay }
+                                if (index >= 0) listState.animateScrollToItem(index)
+                            }
+                        }
                     },
                 )
             }
@@ -1417,6 +1523,12 @@ private fun Conversation(
                                     pickerTarget = null
                                     state.togglePin(message.id)
                                 },
+                                onCopy = message.content?.takeIf { it.isNotBlank() }?.let { text ->
+                                    {
+                                        pickerTarget = null
+                                        clipboard.setText(AnnotatedString(text))
+                                    }
+                                },
                             )
                         },
                     )
@@ -1459,7 +1571,8 @@ private fun Conversation(
                             },
                             placeholder = {
                                 Text(
-                                    "Message  ·  @ to mention · Shift+Enter for a new line",
+                                    if (state.enterToSend) "Message  ·  @ to mention · Shift+Enter for a new line"
+                                    else "Message  ·  @ to mention · Enter for a new line",
                                     color = LocalSingularColors.current.textFaint,
                                 )
                             },
@@ -1506,8 +1619,13 @@ private fun Conversation(
                                         }
 
                                         !isEnter -> false
-                                        // Shift+Enter falls through so the field inserts the newline itself.
-                                        event.isShiftPressed -> false
+                                        // The invertible binding: Enter sends and Shift+Enter
+                                        // breaks the line by default; users from the
+                                        // terminal lineage (see Settings) flip it. The
+                                        // newline falls through either way, so the field
+                                        // inserts it itself.
+                                        state.enterToSend && event.isShiftPressed -> false
+                                        !state.enterToSend && !event.isShiftPressed -> false
                                         else -> {
                                             val editing = editingMessage
                                             if (editing != null) {
@@ -1642,7 +1760,10 @@ private fun Conversation(
                             pickerTarget = if (pickerTarget == "composer") null else "composer"
                         },
                     ) {
-                        Text("😀", fontSize = 22.sp)
+                        // The bundled font, not the OS's: the picker this button opens draws
+                        // Twemoji, and the button itself drawing Segoe/Apple/Noto made the two
+                        // disagree about what the same emoji looks like.
+                        Text("😀", fontSize = 22.sp, fontFamily = emojiFontFamily())
                     }
                     IconButton(
                         onClick = { state.attachAndSend(draft); draft = "" },
@@ -1739,6 +1860,13 @@ private fun ReactionSheet(
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // Copy leads the row: after reacting, it's the most common thing anyone
+                    // does a message — quote it elsewhere, save a link, paste into a search.
+                    // Hidden for messages with no text (the hover cluster takes the same
+                    // stance) rather than offering a copy that copies nothing.
+                    if (row.onCopy != null) {
+                        TextButton(onClick = row.onCopy) { Text("Copy") }
+                    }
                     // Edit: authors only. The server enforces it too, but hiding the affordance
                     // for other people's messages is what stops a user from composing an edit
                     // only to have it bounce.
@@ -1764,6 +1892,10 @@ private fun ReactionSheet(
 /**
  * The non-reaction actions for the long-pressed message. A class rather than a pile of
  * nullable lambdas so a missing action is a missing row item, not a dead button.
+ *
+ * [onCopy] nullable because the hover cluster hides the copy button for messages with no
+ * text (attachments only) — the sheet takes the same stance rather than offering a copy
+ * that copies nothing.
  */
 class MessageSheetActions(
     val canEdit: Boolean,
@@ -1771,6 +1903,7 @@ class MessageSheetActions(
     val onEdit: () -> Unit,
     val onDelete: () -> Unit,
     val onTogglePin: () -> Unit,
+    val onCopy: (() -> Unit)? = null,
 )
 
 /**

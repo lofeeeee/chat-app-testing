@@ -341,6 +341,13 @@ class MessageService(
         channelService.requireVisible(channelId, userId)
         val clean = query.trim()
         if (clean.isEmpty()) return emptyList()
+        // Length cap for the same reason the rate limit exists: a multi-megabyte query string
+        // costs parsing, plan and GIN-index work before the FTS itself runs, and no real
+        // search is longer than a sentence or two. Checked here rather than in the
+        // controller so every entry point to the service gets it.
+        if (clean.length > SEARCH_QUERY_MAX) {
+            throw InvalidInput("Search query too long (max $SEARCH_QUERY_MAX characters).")
+        }
         val size = (limit ?: 25).coerceIn(1, 100)
         val window = Instant.now().minus(SEARCH_LOOKBACK)..Instant.now().plusSeconds(1)
         return messages.search(channelId, clean, size, window.start, window.endInclusive)
@@ -501,5 +508,12 @@ class MessageService(
          * while rejecting a pasted paragraph masquerading as one.
          */
         const val REACTION_EMOJI_MAX = 64
+
+        /**
+         * Cap on a search query. Same reasoning as REACTION_EMOJI_MAX: the point is bounding
+         * what an authenticated user can make Postgres parse, plan and index-probe per call,
+         * not modelling real queries — no real one is longer than a sentence.
+         */
+        const val SEARCH_QUERY_MAX = 256
     }
 }

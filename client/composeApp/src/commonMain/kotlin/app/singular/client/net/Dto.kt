@@ -60,6 +60,11 @@ data class UserSettingsDto(
     val themePrimary: Int? = null,
     val themeSecondary: Int? = null,
     val themeDark: Boolean? = null,
+    /**
+     * Enter-to-send. Null = never set = the app default (Enter sends); flipped by
+     * terminal/IRC-lineage users so Enter makes a newline instead.
+     */
+    val enterToSend: Boolean? = null,
 )
 
 @Serializable

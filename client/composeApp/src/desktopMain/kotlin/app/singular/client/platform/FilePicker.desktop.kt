@@ -23,6 +23,13 @@ actual suspend fun pickFile(imagesOnly: Boolean): PickedFile? = withContext(Disp
     val file = onEventThread { showNativeDialog(imagesOnly) } ?: return@withContext null
     if (!file.isFile || !file.canRead()) return@withContext null
 
+    // The size guard happens BEFORE the read, not after: the point is to never buffer a file
+    // the server would refuse anyway. A 600 MB video dragged into the composer used to be
+    // fully read into memory (twice — bytes plus the request body) before the rejection.
+    if (file.length() > MAX_PICK_BYTES) {
+        throw PickedFileTooLarge(file.length(), MAX_PICK_BYTES)
+    }
+
     // Read on the IO dispatcher, deliberately off the event thread. Compose Desktop runs on
     // the AWT event loop, and a hundred-megabyte read there freezes the window — which reads
     // as a crash, not as work in progress.
@@ -32,6 +39,14 @@ actual suspend fun pickFile(imagesOnly: Boolean): PickedFile? = withContext(Disp
         bytes = file.readBytes(),
     )
 }
+
+/** The pick ceiling, matching the server's upload limit. Anything larger is refused at pick
+ *  time so it is never buffered. */
+internal const val MAX_PICK_BYTES: Long = 100L * 1024 * 1024
+
+/** Raised when the picked file exceeds the upload ceiling. */
+class PickedFileTooLarge(val sizeBytes: Long, val maxBytes: Long) :
+    Exception("That file is ${"%,d".format(sizeBytes / (1024 * 1024))} MB — the limit is ${maxBytes / (1024 * 1024)} MB.")
 
 /**
  * Opens the dialog. Must run on the AWT event thread — it is a native modal window.

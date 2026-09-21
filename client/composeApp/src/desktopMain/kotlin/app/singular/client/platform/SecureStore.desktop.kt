@@ -94,6 +94,13 @@ private object SecureStore {
      * `-NonInteractive` and a timeout because this sits on the launch path: a PowerShell that
      * stops for a prompt, or an execution policy that blocks, must degrade to "no stored
      * token" — a sign-in screen — rather than to an app that never finishes starting.
+     *
+     * Stderr is drained on a dedicated thread for the process's whole lifetime: PowerShell
+     * writes progress/profile noise to stderr even on success, and an undrained pipe whose
+     * buffer fills blocks the *child* mid-write, which freezes our `waitFor` into the 10s
+     * timeout and costs a launch every time. The `redirectErrorStream(false)` above is the
+     * other half of the same fix — redirecting it into stdout would let stderr bytes corrupt
+     * the base64 payload this function exists to return.
      */
     private fun powershell(script: String): String {
         val process = ProcessBuilder(
@@ -101,11 +108,19 @@ private object SecureStore {
             "-ExecutionPolicy", "Bypass", "-Command", script.trimIndent().replace('\n', ' '),
         ).redirectErrorStream(false).start()
 
+        // Drain stderr concurrently with reading stdout — neither stream can be left to fill.
+        val stderrDrainer = Thread({
+            runCatching { process.errorStream.use { it.readBytes() } }
+        }, "securestore-stderr").apply { isDaemon = true }
+        stderrDrainer.start()
+
         val out = process.inputStream.bufferedReader().use { it.readText() }
         if (!process.waitFor(10, TimeUnit.SECONDS)) {
             process.destroyForcibly()
             return ""
         }
+        // Don't leak the drainer past a reasonable ceiling; a normal run joins in microseconds.
+        runCatching { stderrDrainer.join(1_000) }
         return if (process.exitValue() == 0) out.trim() else ""
     }
 

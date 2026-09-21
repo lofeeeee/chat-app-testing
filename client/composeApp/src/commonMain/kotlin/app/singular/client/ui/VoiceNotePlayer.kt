@@ -68,6 +68,7 @@ object VoiceNotePlayer {
         val id = attachment.id
         currentId = id
         activeId = id
+        loadedAttachment = attachment
         onStateChange(true)
 
         loadJob = scope.launch {
@@ -112,7 +113,24 @@ object VoiceNotePlayer {
         player = null
         currentId = null
         activeId = null
+        loadedAttachment = null
     }
+
+    /**
+     * Jumps to a fraction of the playing note's duration — the waveform's tap-to-scrub.
+     *
+     * A fraction rather than seconds: the caller knows the fraction (it just measured its own
+     * width), while the duration lives here with the loaded attachment.
+     */
+    fun seekToFraction(fraction: Float) {
+        val attachment = loadedAttachment ?: return
+        val duration = (attachment.durationMs ?: 0) / 1000f
+        if (duration <= 0f) return
+        player?.seekTo(fraction.coerceIn(0f, 1f) * duration)
+    }
+
+    /** The attachment currently loaded, for duration math in [seekToFraction]. */
+    private var loadedAttachment: AttachmentDto? = null
 
     private fun mimeType(attachment: AttachmentDto): String =
         attachment.contentType ?: "audio/mp4"

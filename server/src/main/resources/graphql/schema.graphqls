@@ -431,6 +431,8 @@ type UserSettings {
   themeSecondary: Int
   "null follows the operating system."
   themeDark: Boolean
+  "Enter sends the message (true) or inserts a newline (false). null means the client default: Enter sends."
+  enterToSend: Boolean
 }
 
 input SettingsInput {
@@ -439,6 +441,8 @@ input SettingsInput {
   themePrimary: Int
   themeSecondary: Int
   themeDark: Boolean
+  "Send only what changed; null means leave the stored value."
+  enterToSend: Boolean
 }
 
 extend type Query {

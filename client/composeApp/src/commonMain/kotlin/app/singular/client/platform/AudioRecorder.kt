@@ -55,4 +55,12 @@ expect class AudioPlayer() {
 
     fun play(bytes: ByteArray, mimeType: String, onEnded: () -> Unit)
     fun stop()
+
+    /**
+     * Jumps to [seconds] within the loaded clip. No-op when nothing is loaded.
+     *
+     * Seek support for the waveform: tapping a spot on the waveform is the scrub gesture every
+     * other player has taught, and the clip is already fully in memory.
+     */
+    fun seekTo(seconds: Float)
 }

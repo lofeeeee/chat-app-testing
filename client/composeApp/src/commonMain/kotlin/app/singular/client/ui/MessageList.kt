@@ -1,12 +1,17 @@
 package app.singular.client.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,10 +30,13 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +54,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -75,6 +84,8 @@ data class RenderedMessage(
     val startsGroup: Boolean,
     /** Last of the run — the one that carries the timestamp in bubble layout. */
     val endsGroup: Boolean,
+    /** First message on its calendar day — the one that carries a date divider. */
+    val startsDay: Boolean,
 )
 
 /**
@@ -83,6 +94,10 @@ data class RenderedMessage(
  * A run breaks on a different author or a gap longer than [GROUP_WINDOW_MINUTES]. The time
  * break matters: without it, two messages from the same person five hours apart render as one
  * continuous block, which reads as though they were said together.
+ *
+ * A day break is tracked separately from the run break: days change mid-run too, and
+ * yesterday's conversation scrolling into today's as one continuous stream is exactly the
+ * thing a date divider exists to prevent.
  */
 fun groupMessages(messages: List<MessageDto>, selfId: String?): List<RenderedMessage> =
     messages.mapIndexed { index, message ->
@@ -98,10 +113,20 @@ fun groupMessages(messages: List<MessageDto>, selfId: String?): List<RenderedMes
             endsGroup = next == null ||
                 next.author.id != message.author.id ||
                 minutesBetween(message.createdAt, next.createdAt) > GROUP_WINDOW_MINUTES,
+            startsDay = prev == null || dayKey(prev.createdAt) != dayKey(message.createdAt),
         )
     }
 
 private const val GROUP_WINDOW_MINUTES = 5
+
+/**
+ * The calendar day an ISO instant falls on, as "YYYY-MM-DD".
+ *
+ * Used only for equality — the divider's label is formatted separately — so no timezone
+ * machinery: everything in the app renders in UTC and the day boundary matches what the
+ * timestamps shown beside messages say.
+ */
+internal fun dayKey(iso: String): String = iso.substringBefore('T')
 
 // ---------------------------------------------------------------------------
 // Rich message text: emoji font + mention highlighting
@@ -122,7 +147,7 @@ private val MENTION_PATTERN = Regex("""<@&?(\d{1,20})>|<#(\d{1,20})>""")
  *   tinted like a link with a soft background. Substitution happens at display time on
  *   purpose — the same reasoning as the server's mention table: a user who renames re-renders
  *   everywhere they were ever mentioned, rather than freezing their old name into history.
- * - emoji runs render through the bundled Noto face, via explicit spans (Compose has no
+ * - emoji runs render through the bundled Twemoji face, via explicit spans (Compose has no
  *   automatic custom-font fallback).
  */
 @Composable
@@ -268,14 +293,22 @@ private fun MessageBody(
 /**
  * The reaction chips under a message: one pill per emoji, count inside, highlighted when
  * the viewer reacted. Tapping toggles your own reaction.
+ *
+ * A `FlowRow`, not a `Row`: a message can collect more distinct reactions than fit the
+ * bubble's width, and a plain Row overflows or clips where a FlowRow wraps and the bubble
+ * grows with it.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ReactionChips(
     reactions: List<app.singular.client.net.ReactionDto>,
     onReact: (String) -> Unit,
 ) {
     val emojiFont = emojiFontFamily()
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
         reactions.forEach { reaction ->
             val mine = reaction.me
             val shape = RoundedCornerShape(999.dp)
@@ -296,12 +329,26 @@ fun ReactionChips(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(reaction.emoji, fontSize = 14.sp, fontFamily = emojiFont)
-                    Text(
-                        reaction.count.toString(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (mine) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    // The count animates rather than hard-swapping: a chip whose number ticks
+                    // up in a room reads as live activity, which is exactly what it is.
+                    androidx.compose.animation.AnimatedContent(
+                        targetState = reaction.count,
+                        transitionSpec = {
+                            (fadeIn(androidx.compose.animation.core.tween(Motion.FAST)) +
+                                androidx.compose.animation.slideInVertically(
+                                    androidx.compose.animation.core.tween(Motion.FAST)
+                                ) { it / 2 }) togetherWith
+                                fadeOut(androidx.compose.animation.core.tween(Motion.FAST))
+                        },
+                        label = "reaction-count",
+                    ) { count ->
+                        Text(
+                            count.toString(),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (mine) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
@@ -345,6 +392,71 @@ fun shortTime(iso: String): String {
     return if (time.length >= 5) time.take(5) else ""
 }
 
+/**
+ * The date divider drawn when the calendar day changes between two messages.
+ *
+ * Double-clicking it jumps to the first message of the *previous* day when older history
+ * is available — the "scroll back to Tuesday" gesture. When nothing older is loaded and
+ * none exists, the click does nothing (and gives no feedback: a disabled-looking divider
+ * is clutter).
+ */
+@Composable
+private fun DayDivider(iso: String, onJumpToPreviousDay: () -> Unit = {}) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp)
+            .pointerInput(iso) {
+                detectTapGestures(onDoubleTap = { onJumpToPreviousDay() })
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.outlineVariant)
+        Text(
+            dayDividerLabel(iso),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 10.dp),
+        )
+        HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.outlineVariant)
+    }
+}
+
+/** The divider's text: Today / Yesterday / "18 September" (+" 2024" when not this year). */
+internal fun dayDividerLabel(iso: String, todayIso: String = todayDateIso()): String {
+    val date = iso.substringBefore('T')
+    val (y, m, d) = date.split('-').mapNotNull { it.toIntOrNull() }.takeIf { it.size == 3 }
+        ?: return date
+
+    when (date) {
+        todayIso -> return "Today"
+        dayBefore(todayIso) -> return "Yesterday"
+    }
+
+    val name = when (m) {
+        1 -> "January"; 2 -> "February"; 3 -> "March"; 4 -> "April"; 5 -> "May"; 6 -> "June"
+        7 -> "July"; 8 -> "August"; 9 -> "September"; 10 -> "October"; 11 -> "November"
+        else -> "December"
+    }
+    return "$d $name${if (y != todayIso.substringBefore('-').toInt()) " $y" else ""}"
+}
+
+/** The previous calendar day of a "YYYY-MM-DD" string, in the same format. */
+internal fun dayBefore(date: String): String {
+    val (y, m, d) = date.split('-').mapNotNull { it.toIntOrNull() }.takeIf { it.size == 3 }
+        ?: return date
+    val leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+    val monthDays = intArrayOf(31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    return when {
+        d > 1 -> "%04d-%02d-%02d".format(y, m, d - 1)
+        m > 1 -> "%04d-%02d-%02d".format(y, m - 1, monthDays[m - 2])
+        else -> "%04d-%02d-%02d".format(y - 1, 12, 31)
+    }
+}
+
+/** Today's date as "YYYY-MM-DD". An expect: every platform has its own way of asking the clock. */
+internal expect fun todayDateIso(): String
+
 @Composable
 fun MessageList(
     messages: List<MessageDto>,
@@ -361,6 +473,14 @@ fun MessageList(
     isFailed: (String) -> Boolean = { false },
     /** Called when the user taps a failed placeholder to retry. */
     onRetry: (MessageDto) -> Unit = {},
+    /** Called when the user chooses to edit a failed send's text instead of retrying. */
+    onEditFailed: (MessageDto) -> Unit = {},
+    /**
+     * Double-clicking a day divider asks to land on that day's first message. The list
+     * itself can't load history, so the host implements the jump: load pages until the
+     * target day is in the window, then scroll. Null disables the gesture.
+     */
+    onJumpToDay: ((dayKey: String) -> Unit)? = null,
 ) {
     val rendered = remember(messages.toList(), selfId) { groupMessages(messages, selfId) }
 
@@ -377,14 +497,18 @@ fun MessageList(
                     // A little air between runs, none within one. This spacing is what actually
                     // makes grouping read as grouping.
                     Column {
+                        if (row.startsDay) DayDivider(
+                            row.message.createdAt,
+                            onJumpToPreviousDay = { onJumpToDay?.invoke(dayBefore(dayKey(row.message.createdAt))) },
+                        )
                         if (row.startsGroup) Spacer(Modifier.size(10.dp))
 
                         when (layout) {
                             ChatLayout.BUBBLES -> BubbleRow(
-                                row, resolver, onReact, onMessageLongPress, isPending, isFailed, onRetry,
+                                row, resolver, onReact, onMessageLongPress, isPending, isFailed, onRetry, onEditFailed,
                             )
                             ChatLayout.COMPACT -> CompactRow(
-                                row, resolver, onReact, onMessageLongPress, isPending, isFailed, onRetry,
+                                row, resolver, onReact, onMessageLongPress, isPending, isFailed, onRetry, onEditFailed,
                             )
                         }
                     }
@@ -412,6 +536,7 @@ private fun BubbleRow(
     isPending: (String) -> Boolean,
     isFailed: (String) -> Boolean,
     onRetry: (MessageDto) -> Unit,
+    onEditFailed: (MessageDto) -> Unit,
 ) {
     val message = row.message
 
@@ -479,7 +604,7 @@ private fun BubbleRow(
                 )
             }
 
-            Bubble(row, resolver, onReact, onMessageLongPress, isPending, isFailed, onRetry)
+            Bubble(row, resolver, onReact, onMessageLongPress, isPending, isFailed, onRetry, onEditFailed)
         }
 
         if (row.mine) Spacer(Modifier.width(8.dp))
@@ -488,7 +613,7 @@ private fun BubbleRow(
         MessageHoverActions(
             visible = hovered,
             mine = row.mine,
-            onReact = { onMessageLongPress(message) },
+            onReact = { emoji -> onReact(message.id, emoji) },
             onCopy = message.content,
             modifier = Modifier.align(if (row.mine) Alignment.TopStart else Alignment.TopEnd),
         )
@@ -505,6 +630,7 @@ private fun Bubble(
     isPending: (String) -> Boolean,
     isFailed: (String) -> Boolean,
     onRetry: (MessageDto) -> Unit,
+    onEditFailed: (MessageDto) -> Unit,
 ) {
     val message = row.message
     var revealed by remember(message.id) { mutableStateOf(false) }
@@ -551,10 +677,18 @@ private fun Bubble(
                 // the message, which is exactly the "bubbles are too big" problem. Aligning a
                 // wrap-content child leaves the bubble sized to its longest line.
                 when {
-                    isFailed(message.id) -> TextButton(
-                        onClick = { onRetry(message) },
-                        modifier = Modifier.align(Alignment.End),
-                    ) { Text("Failed — tap to retry", style = MaterialTheme.typography.labelSmall) }
+                    isFailed(message.id) -> Row(modifier = Modifier.align(Alignment.End)) {
+                        TextButton(onClick = { onRetry(message) }) {
+                            Text("Failed — retry", style = MaterialTheme.typography.labelSmall)
+                        }
+                        // Edit-instead-of-retry: pull the failed text back into the composer.
+                        // Retry is the happy path, but a typo'd message that failed mid-send
+                        // usually wants fixing first — this is the "don't resend my mistake"
+                        // door.
+                        TextButton(onClick = { onEditFailed(message) }) {
+                            Text("Edit", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
                     isPending(message.id) -> Text(
                         "Sending…",
                         style = MaterialTheme.typography.labelSmall,
@@ -591,6 +725,7 @@ private fun CompactRow(
     isPending: (String) -> Boolean,
     isFailed: (String) -> Boolean,
     onRetry: (MessageDto) -> Unit,
+    onEditFailed: (MessageDto) -> Unit,
 ) {
     val message = row.message
     var revealed by remember(message.id) { mutableStateOf(false) }
@@ -666,8 +801,13 @@ private fun CompactRow(
                     )
                     Spacer(Modifier.width(8.dp))
                     when {
-                        isFailed(message.id) -> TextButton(onClick = { onRetry(message) }) {
-                            Text("Failed — retry", style = MaterialTheme.typography.labelSmall)
+                        isFailed(message.id) -> Row {
+                            TextButton(onClick = { onRetry(message) }) {
+                                Text("Failed — retry", style = MaterialTheme.typography.labelSmall)
+                            }
+                            TextButton(onClick = { onEditFailed(message) }) {
+                                Text("Edit", style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                         isPending(message.id) -> Text(
                             "Sending…",
@@ -697,7 +837,7 @@ private fun CompactRow(
         MessageHoverActions(
             visible = hovered,
             mine = row.mine,
-            onReact = { onMessageLongPress(message) },
+            onReact = { emoji -> onReact(message.id, emoji) },
             onCopy = message.content,
             modifier = Modifier.align(if (row.mine) Alignment.TopStart else Alignment.TopEnd),
         )
@@ -713,16 +853,22 @@ private fun CompactRow(
  *
  * The cluster sits at the row's free edge, which is why it never covers the message text —
  * the bubble stack is offset toward the author, and the edge against it is empty.
+ *
+ * Quick reactions are surfaced directly here, not just behind the long-press sheet: reacting
+ * is the most common thing anyone does to a message, and open-sheet → pick → close is two
+ * steps too many for the mouse, which already has the pointer on the row. `QUICK_REACTIONS`
+ * is the same set the sheet leads with, so the two agree about what's quick.
  */
 @Composable
 private fun MessageHoverActions(
     visible: Boolean,
     mine: Boolean,
-    onReact: () -> Unit,
+    onReact: (emoji: String) -> Unit,
     onCopy: String?,
     modifier: Modifier = Modifier,
 ) {
     val clipboard = LocalClipboardManager.current
+    val emojiFont = emojiFontFamily()
 
     AnimatedVisibility(
         visible = visible,
@@ -740,10 +886,19 @@ private fun MessageHoverActions(
                 Modifier.padding(horizontal = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // React. Quick one-tap onto the message, same as the long-press sheet — one
-                // gesture, two input devices.
-                IconButton(onClick = onReact, modifier = Modifier.size(30.dp)) {
-                    Text("😀", fontSize = 15.sp)
+                // The quick reaction row: one tap, no sheet. Same emoji font as everywhere
+                // else — the react affordance used to render from the OS font, which on
+                // Windows drew a visibly different face than the one the picker shows.
+                QUICK_REACTIONS.forEach { emoji ->
+                    Text(
+                        emoji,
+                        fontFamily = emojiFont,
+                        fontSize = 16.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { onReact(emoji) }
+                            .padding(4.dp),
+                    )
                 }
                 onCopy?.takeIf { it.isNotBlank() }?.let { text ->
                     IconButton(

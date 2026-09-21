@@ -98,6 +98,44 @@ val KeyEvent.isCommand: Boolean get() = isCtrlPressed || isMetaPressed
 val KeyEvent.isPress: Boolean get() = type == KeyEventType.KeyDown
 
 /**
+ * A key that means "the user is trying to type": a letter, digit or punctuation with no
+ * Ctrl/Cmd/Alt chord.
+ *
+ * Powers the type-anywhere → composer behaviour. Deliberately *excludes*:
+ *  - arrows, Home/End/PgUp/PgDn, Delete, Insert — scroll/caret navigation, not text;
+ *  - Enter, Tab, Escape, Backspace — they belong to whichever control holds focus
+ *    (Enter confirms, Tab moves, Escape closes; Backspace in an empty composer is a
+ *    common "go back" binding in other apps, so it never triggers a focus grab);
+ *  - anything with Shift — capital letters still type naturally once focused, and Shift
+ *    alone is also the picker's multi-pick modifier;
+ *  - function keys and other non-typing specials.
+ *
+ * The caller checks the modifier chords; this checks the key itself.
+ */
+fun Key.isPlainTypingKey(): Boolean = when (this) {
+    Key.DirectionUp, Key.DirectionDown, Key.DirectionLeft, Key.DirectionRight,
+    Key.MoveHome, Key.MoveEnd, Key.PageUp, Key.PageDown,
+    Key.Enter, Key.NumPadEnter, Key.Tab, Key.Escape, Key.Backspace, Key.Delete, Key.Insert,
+    -> false
+    else ->
+        // Desktop key codes are native ASCII here (verified against the 1.8.0 constants:
+        // Zero=48, A=65, Z=90), so contiguous ranges are exact, not heuristic. Unicode and
+        // input-method text never arrive as key events at this layer.
+        (this.keyCode in Key.A.keyCode..Key.Z.keyCode) ||
+            (this.keyCode in Key.Zero.keyCode..Key.Nine.keyCode) ||
+            isPunctuationKey()
+}
+
+/** Printables outside letters/digits: the punctuation and symbol keys a message can contain. */
+private fun Key.isPunctuationKey(): Boolean = when (this) {
+    Key.Minus, Key.Equals, Key.LeftBracket, Key.RightBracket, Key.Backslash,
+    Key.Semicolon, Key.Apostrophe, Key.Comma, Key.Period, Key.Slash, Key.Spacebar,
+    Key.Grave,
+    -> true
+    else -> false
+}
+
+/**
  * A region that can receive keys even when nothing inside it is focused.
  *
  * Takes focus once on arrival. When a child later takes focus — a text field, a button — this

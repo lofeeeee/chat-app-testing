@@ -78,7 +78,9 @@ if not defined SERVER_JAR (
 )
 
 echo   [2/3] server
-start "Singular server" cmd /k ""%JAVA_EXE%" -jar "%SERVER_JAR%""
+REM dev profile: the explicit declaration that this is a developer's machine (GraphiQL on,
+REM SecretGuard's allowlist satisfied). Production deploys must NOT set it.
+start "Singular server" cmd /k ""%JAVA_EXE%" -jar "%SERVER_JAR%" --spring.profiles.active=dev"
 
 set /a _tries=0
 :waitsrv

@@ -203,6 +203,16 @@ actual class AudioPlayer {
         watcher = null
         positionSeconds = 0f
     }
+
+    actual fun seekTo(seconds: Float) {
+        val c = clip ?: return
+        val frameRate = c.format.frameRate.takeIf { it > 0 } ?: return
+        val frame = (seconds * frameRate).toLong().coerceIn(0, c.microsecondLength / 1000L * frameRate.toLong())
+        runCatching {
+            c.framePosition = frame.toInt()
+            positionSeconds = c.microsecondPosition / 1_000_000f
+        }
+    }
 }
 
 /** A minimal RIFF/WAVE header around 16-bit mono PCM. Forty-four bytes, no dependencies. */

@@ -37,6 +37,7 @@ class AuthService(
     private val snowflake: Snowflake,
     private val audit: AuditLog,
     private val props: SingularProperties,
+    private val wsRegistry: app.singular.security.WebSocketSessionRegistry,
 ) {
 
     @Transactional
@@ -147,6 +148,10 @@ class AuthService(
 
         if (presented.supersededBy != null) {
             val revoked = sessions.revokeFamily(presented.familyId)
+            // Kill the sockets too: the revoked rows alone would leave a working subscription
+            // alive until its access token happened to expire — and reuse-detected theft is
+            // exactly the case where "later" is the wrong answer.
+            val closedSockets = wsRegistry.closeForUser(presented.userId)
             audit.record(
                 presented.userId,
                 AuditAction.TOKEN_REUSE_DETECTED,
@@ -154,11 +159,12 @@ class AuthService(
                 changes = mapOf(
                     "familyId" to presented.familyId.toString(),
                     "sessionsRevoked" to revoked,
+                    "socketsClosed" to closedSockets,
                 ),
             )
             LOG.warn(
-                "Refresh token reuse detected: user={} family={} — revoked {} session(s)",
-                presented.userId, presented.familyId, revoked,
+                "Refresh token reuse detected: user={} family={} — revoked {} session(s), closed {} socket(s)",
+                presented.userId, presented.familyId, revoked, closedSockets,
             )
             throw NotAuthenticated()
         }
@@ -187,6 +193,9 @@ class AuthService(
         // Revoke the family, not just this session: signing out on one device should not leave
         // a rotated descendant of the same login alive.
         sessions.revokeFamily(session.familyId)
+        // And close the user's live sockets on this connection's way out — see refresh()'s
+        // reuse branch for why the rows alone are not enforcement.
+        wsRegistry.closeForUser(session.userId)
         audit.record(session.userId, AuditAction.LOGOUT, sessionId = session.id)
         return true
     }

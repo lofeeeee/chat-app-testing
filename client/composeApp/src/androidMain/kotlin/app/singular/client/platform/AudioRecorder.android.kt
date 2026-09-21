@@ -200,6 +200,14 @@ actual class AudioPlayer {
         temp = null
         positionSeconds = 0f
     }
+
+    actual fun seekTo(seconds: Float) {
+        val mp = player ?: return
+        runCatching {
+            mp.seekTo((seconds * 1000).toInt().coerceIn(0, mp.duration))
+            positionSeconds = mp.currentPosition / 1000f
+        }
+    }
 }
 
 /**

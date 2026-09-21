@@ -34,6 +34,16 @@ actual suspend fun pickFile(imagesOnly: Boolean): PickedFile? {
             if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
         } ?: "file"
 
+        // Size guard before the read, for the same reason as desktop's: never buffer what the
+        // server would refuse. Queried from the document's own metadata, so it costs nothing.
+        val sizeBytes = resolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (index >= 0 && cursor.moveToFirst() && !cursor.isNull(index)) cursor.getLong(index) else null
+        }
+        if (sizeBytes != null && sizeBytes > MAX_PICK_BYTES) {
+            throw PickedFileTooLarge(sizeBytes, MAX_PICK_BYTES)
+        }
+
         val bytes = runCatching {
             resolver.openInputStream(uri)?.use { it.readBytes() }
         }.getOrNull() ?: return@withContext null
@@ -47,6 +57,14 @@ actual suspend fun pickFile(imagesOnly: Boolean): PickedFile? {
         )
     }
 }
+
+/** The pick ceiling, matching the server's upload limit. Anything larger is refused at pick
+ *  time so it is never buffered. */
+internal const val MAX_PICK_BYTES: Long = 100L * 1024 * 1024
+
+/** Raised when the picked file exceeds the upload ceiling. */
+class PickedFileTooLarge(val sizeBytes: Long, val maxBytes: Long) :
+    Exception("That file is ${sizeBytes / (1024 * 1024)} MB — the limit is ${maxBytes / (1024 * 1024)} MB.")
 
 /**
  * Connects the Activity's result launcher to the suspending [pickFile].

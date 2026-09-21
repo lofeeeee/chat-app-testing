@@ -1,19 +1,24 @@
 ﻿package app.singular.client.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -26,6 +31,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -55,6 +61,9 @@ import app.singular.client.platform.notificationsAvailable
  */
 @Composable
 fun SettingsScreen(state: AppState, onClose: () -> Unit) {
+    val colors = LocalSingularColors.current
+    val windowWidth = LocalWindowWidth.current
+
     var section by remember { mutableStateOf(SettingsSection.ACCOUNT) }
     var confirmSignOut by remember { mutableStateOf(false) }
 
@@ -65,27 +74,58 @@ fun SettingsScreen(state: AppState, onClose: () -> Unit) {
         )
     }
 
-    Row(Modifier.fillMaxSize()) {
-        SettingsNav(
-            title = "Settings",
-            items = SettingsSection.entries.map { SettingsNavItem(it, it.title, it.blurb) },
-            selected = section,
-            onPick = { section = it },
-            onClose = onClose,
-            footer = { SettingsSignOutButton { confirmSignOut = true } },
-        )
-        VerticalDivider()
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            shape = if (windowWidth.atLeastMedium) SingularShapes.large else RoundedCornerShape(0.dp),
+            color = colors.surface,
+            border = if (windowWidth.atLeastMedium) BorderStroke(1.dp, colors.line) else null,
+            modifier = Modifier
+                .then(
+                    if (windowWidth.atLeastMedium) {
+                        Modifier
+                            .widthIn(max = 1000.dp)
+                            .fillMaxWidth(0.92f)
+                            .heightIn(min = 520.dp, max = 800.dp)
+                            .fillMaxHeight(0.88f)
+                            .padding(vertical = 20.dp)
+                    } else {
+                        Modifier.fillMaxSize()
+                    }
+                )
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                )
+                .animateEntrance(),
+        ) {
+            Row(Modifier.fillMaxSize()) {
+                SettingsNav(
+                    title = "Settings",
+                    items = SettingsSection.entries.map { SettingsNavItem(it, it.title, it.blurb) },
+                    selected = section,
+                    onPick = { section = it },
+                    onClose = onClose,
+                    footer = { SettingsSignOutButton { confirmSignOut = true } },
+                )
+                VerticalDivider(color = colors.line)
 
-        SettingsPane(section.title) {
-            when (section) {
-                SettingsSection.ACCOUNT -> AccountSection(state)
-                SettingsSection.APPEARANCE -> AppearanceSection(state)
-                SettingsSection.PRIVACY -> PrivacySection(state)
-                SettingsSection.NOTIFICATIONS -> NotificationsSection(state)
-                SettingsSection.ABOUT -> AboutSection()
+                SettingsPane(
+                    title = section.title,
+                    trailing = { CloseEscButton(onClick = onClose) },
+                ) {
+                    when (section) {
+                        SettingsSection.ACCOUNT -> AccountSection(state)
+                        SettingsSection.APPEARANCE -> AppearanceSection(state)
+                        SettingsSection.PRIVACY -> PrivacySection(state)
+                        SettingsSection.NOTIFICATIONS -> NotificationsSection(state)
+                        SettingsSection.ABOUT -> AboutSection()
+                    }
+                }
             }
-            // Errors surface via the snackbar host (App.kt); keeping them inline here meant a
-            // failed avatar upload sat above the Save button until you left and came back.
         }
     }
 }
@@ -225,6 +265,16 @@ private fun AppearanceSection(state: AppState) {
             description = "Skip screen transitions and entrance animations on this device.",
             checked = state.reduceMotion,
             onCheckedChange = { state.reduceMotion = it },
+        )
+
+        HorizontalDivider()
+
+        SettingToggle(
+            title = "Press Enter to send",
+            description = if (state.enterToSend) "Enter sends, Shift+Enter adds a new line"
+                          else "Enter adds a new line, Shift+Enter sends",
+            checked = state.enterToSend,
+            onCheckedChange = { state.updateEnterToSend(it) },
         )
     }
 }

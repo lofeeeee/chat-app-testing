@@ -9,12 +9,16 @@ import singular_client.composeapp.generated.resources.Res
 // The generated accessor is an *extension property* on `Res.font`, declared at package level
 // and named after the file — so it is imported by that name. Importing `...resources.font`
 // looks right and isn't: `font` is a nested object reached through `Res`, not a package.
-import singular_client.composeapp.generated.resources.noto_color_emoji
+import singular_client.composeapp.generated.resources.twemoji
 
 /**
  * The bundled emoji face (what.txt: never rely on the OS emoji font — Windows renders many
- * glyphs badly and every platform draws a different set). One colour TTF covering the full
- * Unicode set; no per-emoji assets, no runtime fetch.
+ * glyphs badly and every platform draws a different set).
+ *
+ * Twemoji (the Mozilla COLR build of Twitter/X artwork): flat, muted palette and restrained
+ * expressions — Noto Color Emoji's high-saturation gradients read loud next to a dark UI.
+ * It is also a single ~1.4 MB colour TTF versus Noto's ~10.7 MB, which matters on mobile.
+ * One colour TTF covering the set; no per-emoji assets, no runtime fetch.
  *
  * Compose has no automatic custom-font fallback, so this is applied per-run: [emojiRunRanges]
  * splits a string into the spans an emoji font should claim, and the renderers wrap those
@@ -22,7 +26,7 @@ import singular_client.composeapp.generated.resources.noto_color_emoji
  */
 @Composable
 fun emojiFontFamily(): FontFamily =
-    FontFamily(Font(Res.font.noto_color_emoji, FontWeight.Normal, FontStyle.Normal))
+    FontFamily(Font(Res.font.twemoji, FontWeight.Normal, FontStyle.Normal))
 
 /**
  * Codepoints the emoji font should claim.

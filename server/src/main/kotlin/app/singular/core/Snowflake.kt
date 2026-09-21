@@ -47,7 +47,7 @@ class Snowflake(props: SingularProperties) {
                 "Clock moved backwards by ${drift}ms — refusing to mint ids. Check NTP."
             }
             while (now < lastTimestamp) {
-                Thread.onSpinWait()
+                parkBriefly()
                 now = System.currentTimeMillis()
             }
         }
@@ -55,9 +55,12 @@ class Snowflake(props: SingularProperties) {
         if (now == lastTimestamp) {
             sequence = (sequence + 1) and MAX_SEQUENCE
             // 4096 ids in the same millisecond: wait for the next tick rather than collide.
+            // This is not a doomsday path — 4096 ids in one millisecond on one node is a
+            // burst the pool and Postgres can't feed anyway — but when it happens, burning
+            // CPU that the request-handling threads need is strictly worse than parking.
             if (sequence == 0L) {
                 while (now <= lastTimestamp) {
-                    Thread.onSpinWait()
+                    parkBriefly()
                     now = System.currentTimeMillis()
                 }
             }
@@ -81,6 +84,23 @@ class Snowflake(props: SingularProperties) {
         private const val TIMESTAMP_SHIFT = SEQUENCE_BITS + NODE_BITS
         private const val MAX_TOLERATED_DRIFT_MS = 5_000L
 
+        /**
+         * How long a waiter parks between clock rechecks.
+         *
+         * `Thread.onSpinWait` in these loops burns a full core per waiting id-mint for as long
+         * as the condition holds — a core that virtual-thread carriers and the request path
+         * need. Parking instead costs zero CPU. It doesn't fully solve carrier pinning on Java
+         * 21 (sleeping while holding the monitor still pins the carrier until the wait ends;
+         * JEP 491 removes that in Java 24+), but a pinned-and-parked carrier is harmless
+         * compared to a pinned-and-spinning one, and the waits here are sub-millisecond by
+         * construction — they only exist to cross a single clock tick.
+         *
+         * 200µs keeps the wait's resolution comfortably inside a millisecond (we only ever
+         * need to cross one) while costing at most ~5 empty wakeups per ms — negligible next
+         * to a JDBC round trip, and it never runs at all in the common case.
+         */
+        private const val PARK_NANOS = 200_000L
+
         fun timestampOf(id: Long): Instant =
             Instant.ofEpochMilli((id ushr TIMESTAMP_SHIFT) + EPOCH)
 
@@ -92,5 +112,10 @@ class Snowflake(props: SingularProperties) {
          */
         fun floorFor(at: Instant): Long =
             (at.toEpochMilli() - EPOCH).coerceAtLeast(0) shl TIMESTAMP_SHIFT
+    }
+
+    /** Sleeps a fraction of a millisecond instead of spinning. See [PARK_NANOS]. */
+    private fun parkBriefly() {
+        Thread.sleep(0, PARK_NANOS.toInt())
     }
 }

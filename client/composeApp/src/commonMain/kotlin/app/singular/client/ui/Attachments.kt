@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.singular.client.net.AttachmentDto
@@ -230,7 +232,22 @@ private fun VoiceNote(attachment: AttachmentDto, tint: Color) {
         }
         Spacer(Modifier.width(6.dp))
 
-        Canvas(Modifier.weight(1f).height(26.dp)) {
+        // Tap-to-scrub: the fraction across the waveform's width is the fraction through the
+        // note. pointerInput on the Canvas itself rather than a wrapping Box, so the gesture
+        // and the drawing share one coordinate space — no off-by-padding math.
+        val duration = attachment.durationMs ?: 0
+        Canvas(
+            Modifier
+                .weight(1f)
+                .height(26.dp)
+                .pointerInput(attachment.id, duration) {
+                    detectTapGestures { offset ->
+                        if (size.width > 0 && duration > 0) {
+                            VoiceNotePlayer.seekToFraction(offset.x / size.width.toFloat())
+                        }
+                    }
+                }
+        ) {
             // A flat line when there are no peaks: an empty gap would read as a broken message,
             // and some encoders simply don't give us peaks.
             val peaks = attachment.waveform.ifEmpty { List(28) { 22 } }

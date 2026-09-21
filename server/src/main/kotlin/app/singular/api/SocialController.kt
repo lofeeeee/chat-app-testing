@@ -27,6 +27,7 @@ data class SettingsInput(
     val themeSecondary: Int? = null,
     val themeDark: Boolean? = null,
     val themePreset: ThemePreset? = null,
+    val enterToSend: Boolean? = null,
 )
 
 /**
@@ -163,6 +164,7 @@ class SocialController(
             // case only: a client sending null means leave it, which is why clearing a preset
             // back to the default is done by sending DEFAULT rather than by sending nothing.
             themePreset = input.themePreset?.name ?: current.themePreset,
+            enterToSend = input.enterToSend ?: current.enterToSend,
         )
         social.saveSettings(principal.userId, merged)
         return merged
@@ -229,6 +231,10 @@ class SocialController(
     @SchemaMapping(typeName = "UserSettings", field = "themePreset")
     fun settingsPreset(s: UserSettings): ThemePreset? =
         s.themePreset?.let { runCatching { ThemePreset.valueOf(it) }.getOrNull() }
+
+    /** Enter-to-send preference; null when never set, and the client resolves its default. */
+    @SchemaMapping(typeName = "UserSettings", field = "enterToSend")
+    fun settingsEnterToSend(s: UserSettings): Boolean? = s.enterToSend
 
     // -- User field resolvers ------------------------------------------------
 
