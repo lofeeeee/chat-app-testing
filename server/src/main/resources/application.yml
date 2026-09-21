@@ -43,8 +43,14 @@ spring:
 server:
   port: ${PORT:8080}
   shutdown: graceful
-  # Behind a reverse proxy this is how the real client IP reaches connection_sessions.
-  forward-headers-strategy: framework
+  # NOTE: no `forward-headers-strategy` here, deliberately. That setting registers Spring's
+  # ForwardedHeaderFilter, which rewrites request.remoteAddr from X-Forwarded-* whenever the
+  # header is present — unconditionally, no knob. That would make `singular.trust-proxy=false`
+  # meaningless: the resolver's socket-address fallback would itself be the forged value.
+  # Forwarded headers reach the app only through ClientInfoResolver, gated by the explicit
+  # trust-proxy flag below. If some other component ever needs scheme/host rewriting behind a
+  # proxy, revisit this — but nothing here does (presigned URLs are built from the MinIO
+  # endpoint config, not the request host).
 
 singular:
   # MUST be unique per running instance, 0-1023. Two nodes sharing an id will mint duplicate

@@ -150,3 +150,74 @@ it would render as tofu. `📶` signal covers the intent.
 - The node-local rate limiter's N× multiplier is honestly documented but worth
   revisiting before deploying more than one instance (see
   `TokenBucketRateLimiter` header comment).
+
+---
+
+## Second pass — security hardening (external audit round)
+
+All six findings from an external review, plus the four of its
+recommendations that weren't duplicates of the findings. Both modules
+compile clean; server unit tests and the desktop suite pass.
+
+1. **Decompression-bomb guard before `ImageIO.read`** (`MediaService.kt`).
+   The 25 MB image ceiling constrains the *compressed* payload, not the
+   decoded pixels — a ~100 KB PNG declaring 50000×50000 would make
+   `finalizeUpload` try to allocate ~10 GB on a request thread. A new
+   `readCappedImage` reads the header's width/height first (free) and
+   refuses anything over `singular.media.max-image-edge` (8192px default,
+   env `MEDIA_MAX_IMAGE_EDGE`) before allocating anything. Oversized or
+   malformed files degrade exactly like undecodable ones already did:
+   reclassified to a plain FILE, never served through an image decoder.
+
+2. **`singular.trust-proxy` — forwarded headers are now opt-in**
+   (`ClientInfoResolver`, `ProxyTrustConfig`, `SingularProperties`).
+   `ClientInfoResolver` previously read `X-Forwarded-For` unconditionally,
+   which let anyone mint a fresh rate-limit identity per request on an
+   exposed deployment. The resolver now keys on the socket address unless
+   `SINGULAR_TRUST_PROXY=true`, set only behind a proxy that *overwrites*
+   those headers. Also removed `forward-headers-strategy: framework` from
+   `application.yml`: that filter rewrites `request.remoteAddr` from
+   forwarded headers whenever they're present — unconditionally — which
+   would have made the new flag meaningless by feeding the forged value
+   straight to the resolver's own fallback path.
+
+3. **`SecretGuard` is an allowlist, not a prod-detector; GraphiQL off by
+   default** (`SecretGuard.kt`, `application.yml`, new `application-dev.yml`).
+   Keying the guard on "prod profile active" failed open for every
+   deployment that forgot the flag or named its profile `staging`. Now the
+   *dev* side is the allowlist (`dev`/`local`/`test`): running with
+   repository-printed secrets and no dev profile fails at startup.
+   GraphiQL likewise defaults off and comes back on only under the dev
+   profile (env `GRAPHIQL_ENABLED` overrides either way). `start.bat` and
+   the README now run `bootRun` with `--spring.profiles.active=dev`.
+
+4. **Android secrets: Keystore-backed AES-256-GCM at rest**
+   (`SecureStore.android.kt`). Was private-mode SharedPreferences —
+   plaintext on disk. Now each value is sealed with a non-exportable
+   Keystore key, fresh IV per write (`v1:iv:ciphertext` format), with
+   transparent read-migration from plaintext-era values. `android.util.Base64`
+   throughout (not `java.util.Base64` — that one is API 33+ and this
+   project's minSdk is 26), `NO_WRAP` so the encoded parts can't smuggle a
+   newline into the delimited format.
+
+5. **PowerShell stderr drained** (`SecureStore.desktop.kt`). DPAPI calls
+   spawn `powershell.exe`; its profile/progress noise goes to stderr, and an
+   undrained pipe that fills blocks the child mid-write — freezing the
+   caller into its 10s timeout. Stderr now drains on a daemon thread for
+   the process's lifetime (`redirectErrorStream(false)` stays, so stderr
+   can't corrupt the base64 on stdout).
+
+6. **Snowflake waits park, not spin** (`Snowflake.kt`). The clock-backwards
+   and sequence-rollover loops burned a full core with `Thread.onSpinWait`
+   for up to a full tick while holding the generator's monitor — a core the
+   virtual-thread carriers need. They park in 200µs slices now. Carrier
+   pinning on Java 21 remains (JEP 491 removes it in 24+), but
+   pinned-and-parked is harmless where pinned-and-spinning wasn't.
+
+### Notes for review
+
+- `forward-headers-strategy` removal is behavioural: behind a proxy, socket
+  addresses are now the proxy's address until `SINGULAR_TRUST_PROXY=true`
+  is set. That's the intended shape — see the yml comment.
+- The Android source set compiles only with an SDK present; this round's
+  Android changes were verified by review, not by the desktop CI build.

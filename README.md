@@ -119,12 +119,18 @@ never touch it.
 
 ```bash
 cd server
-./gradlew bootRun
+./gradlew bootRun --args='--spring.profiles.active=dev'
 ```
 
 - GraphQL endpoint: `http://localhost:8080/graphql`
 - WebSocket (subscriptions): `ws://localhost:8080/graphql`
-- GraphiQL (dev only): `http://localhost:8080/graphiql`
+- GraphiQL: `http://localhost:8080/graphiql` (dev profile only)
+
+The `dev` profile is the local-development declaration: GraphiQL on, and `SecretGuard`
+satisfied that the built-in dev secrets are acceptable on this machine. Without it the
+server boots locked-down — GraphiQL off, and **it refuses to start** if the token secret
+or pepper is still a repository-printed dev value. (`start.bat` runs the built jar with
+the same profile.)
 
 Flyway applies all five migrations on boot and creates monthly partitions through 2027.
 
@@ -162,9 +168,16 @@ Everything is env-overridable; see `server/src/main/resources/application.yml`.
 | Variable | Default | Notes |
 |---|---|---|
 | `SINGULAR_NODE_ID` | `1` | Snowflake worker id. **Must be unique per running instance** (0–1023). |
-| `SINGULAR_TOKEN_SECRET` | dev value | HMAC key for access tokens. **Replace before any deployment.** |
-| `SINGULAR_PEPPER` | dev value | Server pepper for blind indexes. Changing it invalidates every email lookup. |
+| `SINGULAR_TOKEN_SECRET` | dev value | HMAC key for access tokens. **Replace before any deployment** — the server refuses to start with the dev value unless a dev/local/test profile is active. |
+| `SINGULAR_PEPPER` | dev value | Server pepper for blind indexes. Changing it invalidates every email lookup. Same refusal rule as the token secret. |
+| `SINGULAR_TRUST_PROXY` | `false` | Trust `X-Forwarded-For`/`X-Real-IP` as the client's real IP. Enable **only** behind a reverse proxy that overwrites those headers — behind a proxy, leaving it off collapses every IP-keyed rate limit to the proxy's address; directly exposed, turning it on lets anyone mint a fresh rate-limit identity per request. |
+| `GRAPHIQL_ENABLED` | `false` | GraphiQL schema browser. Off by default; the `dev` profile (or this env var) turns it on for local work. |
 | `DB_URL` / `DB_USER` / `DB_PASSWORD` | local docker | |
+
+`bootRun` from the repo defaults to no profile: GraphiQL off, dev secrets refused. For
+everyday local development run (or debug) with `--spring.profiles.active=dev`, which is
+what `start.bat` does — it enables GraphiQL and declares "this is a developer's machine"
+to `SecretGuard` (the same allowlist: `dev`/`local`/`test`).
 
 ### Ports
 
@@ -331,7 +344,7 @@ Everything below was run against a live server and a real PostgreSQL 17, not ass
 
 ```bash
 cd server && ./gradlew build          # unit tests
-docker compose up -d && ./gradlew bootRun
+docker compose up -d && ./gradlew bootRun --args='--spring.profiles.active=dev'
 pwsh scripts/e2e-api.ps1              # checks over the real GraphQL API
 pwsh scripts/e2e-qr-ws.ps1            # checks over a real graphql-ws socket
 ```

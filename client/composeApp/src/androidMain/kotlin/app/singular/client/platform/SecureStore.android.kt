@@ -3,9 +3,9 @@ package app.singular.client.platform
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.Base64
 import app.singular.client.SingularApp
 import java.security.KeyStore
-import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -62,8 +62,8 @@ private object SecureStore {
         val parts = stored.split(':')
         if (parts.size != 3) return null
 
-        val iv = Base64.getDecoder().decode(parts[1])
-        val blob = Base64.getDecoder().decode(parts[2])
+        val iv = Base64.decode(parts[1], Base64.NO_WRAP)
+        val blob = Base64.decode(parts[2], Base64.NO_WRAP)
 
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_BITS, iv))
@@ -76,10 +76,10 @@ private object SecureStore {
             cipher.init(Cipher.ENCRYPT_MODE, key())
             val blob = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
 
-            val b64 = Base64.getEncoder()
+            val b64 = Base64.encodeToString(blob, Base64.NO_WRAP)
             prefs.edit().putString(
                 key,
-                "$FORMAT_PREFIX:${b64.encodeToString(cipher.iv)}:${b64.encodeToString(blob)}",
+                "$FORMAT_PREFIX:${Base64.encodeToString(cipher.iv, Base64.NO_WRAP)}:$b64",
             ).apply()
         }
     }
