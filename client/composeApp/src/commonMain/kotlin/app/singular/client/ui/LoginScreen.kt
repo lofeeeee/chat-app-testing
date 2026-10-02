@@ -192,7 +192,7 @@ fun LoginScreen(state: AppState, qr: QrLoginState) {
                                     "Singular",
                                     style = MaterialTheme.typography.headlineLarge.copy(
                                         fontWeight = FontWeight.Bold,
-                                        letterSpacing = (-0.5).sp,
+                                        letterSpacing = BrandLetterSpacing,
                                     ),
                                     color = colors.text,
                                 )

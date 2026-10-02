@@ -31,9 +31,9 @@ fun main() = application {
         //
         // Undecorated windows keep Compose's resize grips, and without a minimum those will
         // happily drag the window down to a few pixels — at which point no amount of
-        // responsive layout helps, because there is genuinely nowhere to put anything. 520x400
-        // is the smallest size the compact layout still reads at: rail, one pane, composer.
-        LaunchedEffect(window) { window.minimumSize = Dimension(520, 400) }
+        // responsive layout helps, because there is genuinely nowhere to put anything. 400x320
+        // allows quarter-screen corner snapping (quadrants) even on scaled 1080p/768p displays.
+        LaunchedEffect(window) { window.minimumSize = Dimension(400, 320) }
 
         // Point at another host with -Dsingular.server=https://chat.example.com
         val host = System.getProperty("singular.server")

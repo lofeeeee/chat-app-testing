@@ -63,6 +63,9 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import app.singular.client.net.MessageDto
 import app.singular.client.net.ReactionDto
 import app.singular.client.net.UserDto
@@ -328,7 +331,7 @@ fun ReactionChips(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Text(reaction.emoji, fontSize = 14.sp, fontFamily = emojiFont)
+                    Text(reaction.emoji, fontSize = EmojiSize.reaction, fontFamily = emojiFont)
                     // The count animates rather than hard-swapping: a chip whose number ticks
                     // up in a room reads as live activity, which is exactly what it is.
                     androidx.compose.animation.AnimatedContent(
@@ -573,11 +576,16 @@ private fun BubbleRow(
             Spacer(Modifier.width(12.dp))
         }
 
+        var showProfile by remember { mutableStateOf(false) }
+        if (showProfile) ProfilePopup(message.author, onDismiss = { showProfile = false })
+
         // Avatar only on the last message of an incoming run, so it sits beside the tail of the
         // bubble stack the way a speaker's portrait does. A blank keeps the column aligned.
         if (!row.mine) {
             if (row.endsGroup) {
-                Avatar(message.author, size = 28)
+                Box(Modifier.clickable { showProfile = true }) {
+                    Avatar(message.author, size = 28)
+                }
             } else {
                 Spacer(Modifier.size(28.dp))
             }
@@ -773,10 +781,15 @@ private fun CompactRow(
             Spacer(Modifier.width(12.dp))
         }
 
+        var showProfile by remember { mutableStateOf(false) }
+        if (showProfile) ProfilePopup(message.author, onDismiss = { showProfile = false })
+
         // Avatar on the first of a run only. Continuation lines get a blank gutter of the same
         // width, which is what keeps the text edges aligned down the whole column.
         if (row.startsGroup) {
-            Avatar(message.author, size = 36)
+            Box(Modifier.clickable { showProfile = true }) {
+                Avatar(message.author, size = 36)
+            }
         } else {
             Spacer(Modifier.size(36.dp))
         }
@@ -893,7 +906,7 @@ private fun MessageHoverActions(
                     Text(
                         emoji,
                         fontFamily = emojiFont,
-                        fontSize = 16.sp,
+                        fontSize = EmojiSize.messageInline,
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .clickable { onReact(emoji) }
@@ -965,5 +978,51 @@ internal fun Avatar(seed: String, label: String, size: Int) {
             style = MaterialTheme.typography.labelLarge,
             color = onOf(avatarColor(seed)),
         )
+    }
+}
+
+/**
+ * A compact user profile card shown when tapping an avatar in the message list.
+ */
+@Composable
+fun ProfilePopup(user: UserDto, onDismiss: () -> Unit) {
+    Popup(
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Surface(
+            shape = SingularShapes.medium,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            tonalElevation = 6.dp,
+            shadowElevation = 8.dp,
+            modifier = Modifier.widthIn(max = 260.dp).animateEntrance(),
+        ) {
+            Column(
+                Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Avatar(user, 56)
+                Text(
+                    user.label,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    user.handle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                user.bio?.takeIf { it.isNotBlank() }?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                    )
+                }
+            }
+        }
     }
 }

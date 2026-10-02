@@ -45,6 +45,11 @@ import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.WindowStateListener
 
+/** Compose colour → AWT colour, for the handful of places that talk to real OS windows. */
+private fun androidx.compose.ui.graphics.Color.toAwtColor(): java.awt.Color = java.awt.Color(
+    (red * 255).toInt(), (green * 255).toInt(), (blue * 255).toInt(),
+)
+
 /**
  * The window's own title bar, drawn by the app.
  *
@@ -69,6 +74,17 @@ fun SingularTitleBar(
     title: String = "Singular",
 ) {
     val controller = remember(window) { WindowController(window) }
+
+    // The snap ghost, tinted with the live accent so a theme change mid-session recolours it.
+    // DisposableEffect rather than plain remember: an AWT window is a real OS resource, and
+    // leaking one on every recomposition of a long-lived title bar would pile up invisible
+    // always-on-top windows. hide() is idempotent, so dispose-on-leave is safe even if the
+    // drag never opened it.
+    val accent = MaterialTheme.colorScheme.primary.toAwtColor()
+    val snapPreview = remember(accent) { SnapPreviewWindow(accent) }
+    DisposableEffect(snapPreview) {
+        onDispose { snapPreview.hide() }
+    }
 
     // Mirrors the window's real geometry rather than tracking our own idea of it.
     //
@@ -99,7 +115,7 @@ fun SingularTitleBar(
             .fillMaxWidth()
             .height(36.dp)
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .titleBarGestures(window, controller),
+            .titleBarGestures(window, controller, snapPreview),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Spacer(Modifier.width(12.dp))
@@ -132,7 +148,7 @@ fun SingularTitleBar(
 }
 
 /**
- * Dragging, double-click, and snap-on-release.
+ * Dragging, double-click, and snap-on-release — with a live preview of where the snap would land.
  *
  * Compose Desktop ships `WindowDraggableArea`, and it is not enough: it moves the window and
  * nothing else, so there is no snapping and no way to drag a maximised window loose. Both are
@@ -141,10 +157,14 @@ fun SingularTitleBar(
  * Dragging a maximised window **restores it under the cursor** — grabbing the bar of a
  * maximised window and pulling down is how you un-maximise, and a window that either refused
  * to move or leapt away from the pointer would be worse than not supporting it.
+ *
+ * While the pointer is inside a snap zone, a translucent accent-tinted ghost shows the target
+ * rectangle; released there, the window snaps to exactly what the ghost showed.
  */
 private fun Modifier.titleBarGestures(
     window: ComposeWindow,
     controller: WindowController,
+    snapPreview: SnapPreviewWindow,
 ): Modifier = this
     .pointerInput(window) {
         detectTapGestures(onDoubleTap = { controller.toggleMaximised() })
@@ -164,13 +184,22 @@ private fun Modifier.titleBarGestures(
             onDrag = { _, _ ->
                 val pointer = MouseInfo.getPointerInfo()?.location ?: return@detectDragGestures
                 window.setLocation(pointer.x - grabOffset.x, pointer.y - grabOffset.y)
+                // The ghost follows the zone *during* the drag — snap is decided on release,
+                // and the preview is the promise of what that release will do.
+                snapPreview.show(snapTarget(snapZoneFor(pointer), pointer))
             },
             onDragEnd = {
-                // Snap is decided on release, from where the pointer ended up. Deciding during
-                // the drag would need a preview overlay to be anything but startling.
+                // Snap is decided on release, from where the pointer ended up — and lands on
+                // exactly the rectangle the ghost was showing, because both read snapTarget().
+                snapPreview.hide()
                 val pointer = MouseInfo.getPointerInfo()?.location ?: return@detectDragGestures
                 val zone = snapZoneFor(pointer)
                 if (zone == SnapZone.NONE) controller.noteMoved() else controller.applySnap(zone, pointer)
+            },
+            onDragCancel = {
+                // A cancelled drag (input consumed elsewhere, focus stolen) must not leave a
+                // ghost pinned on screen claiming a snap that will never happen.
+                snapPreview.hide()
             },
         )
     }

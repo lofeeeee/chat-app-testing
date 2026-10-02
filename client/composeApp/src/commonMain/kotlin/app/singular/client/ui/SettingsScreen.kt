@@ -1,4 +1,4 @@
-﻿package app.singular.client.ui
+package app.singular.client.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -88,9 +88,9 @@ fun SettingsScreen(state: AppState, onClose: () -> Unit) {
                         Modifier
                             .widthIn(max = 1000.dp)
                             .fillMaxWidth(0.92f)
-                            .heightIn(min = 520.dp, max = 800.dp)
-                            .fillMaxHeight(0.88f)
-                            .padding(vertical = 20.dp)
+                            .heightIn(max = 800.dp)
+                            .fillMaxHeight(0.92f)
+                            .padding(vertical = 16.dp)
                     } else {
                         Modifier.fillMaxSize()
                     }
@@ -560,9 +560,9 @@ private fun AccountSection(state: AppState) {
                 contentAlignment = Alignment.Center,
             ) {
                 if (statusEmoji.isBlank()) {
-                    Text("😀", fontSize = 24.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("😀", fontSize = EmojiSize.status, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
-                    Text(statusEmoji, fontSize = 24.sp)
+                    Text(statusEmoji, fontSize = EmojiSize.status)
                 }
             }
             Spacer(Modifier.width(12.dp))
@@ -811,6 +811,13 @@ private fun NotificationsSection(state: AppState) {
             description = "Off shows only “New message” — useful when you share your screen.",
             checked = state.notifyPreviews,
             onCheckedChange = { state.notifyPreviews = it },
+            enabled = notificationsAvailable && state.notifyEnabled,
+        )
+        SettingToggle(
+            title = "Notification sound",
+            description = "Play a sound when a notification arrives.",
+            checked = state.notifySound,
+            onCheckedChange = { state.notifySound = it },
             enabled = notificationsAvailable && state.notifyEnabled,
         )
 

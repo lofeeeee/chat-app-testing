@@ -158,8 +158,8 @@ fun SettingsPane(
         modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+            .padding(Spacing.page),
+        verticalArrangement = Arrangement.spacedBy(Spacing.block),
     ) {
         Row(
             Modifier.fillMaxWidth(),
@@ -199,7 +199,7 @@ fun CloseEscButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
             "ESC",
             style = MaterialTheme.typography.labelSmall.copy(
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 0.5.sp,
+                letterSpacing = KbdLetterSpacing,
             ),
             color = colors.textMuted,
         )
@@ -209,8 +209,8 @@ fun CloseEscButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
 /** One grouped card of settings. The only container a settings section needs. */
 @Composable
 fun SettingsCard(content: @Composable () -> Unit) {
-    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {   // capped by the pane it sits in
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Card(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
+        Column(Modifier.padding(Spacing.block), verticalArrangement = Arrangement.spacedBy(Spacing.xxl)) {
             content()
         }
     }

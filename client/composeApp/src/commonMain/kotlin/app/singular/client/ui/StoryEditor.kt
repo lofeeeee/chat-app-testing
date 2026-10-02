@@ -379,7 +379,7 @@ private fun StickerPickerSection(onPick: (String) -> Unit) {
                 Text(
                     emoji,
                     fontFamily = font,
-                    fontSize = 26.sp,
+                    fontSize = EmojiSize.editor,
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
                         .clickable { onPick(emoji) }

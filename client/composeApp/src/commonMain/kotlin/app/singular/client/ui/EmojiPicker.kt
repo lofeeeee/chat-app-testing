@@ -303,7 +303,7 @@ private fun EmojiCell(emoji: String, cellSize: Dp = EMOJI_CELL, onClick: (keepOp
         Text(
             emoji,
             fontFamily = font,
-            fontSize = 22.sp,
+            fontSize = EmojiSize.picker,
         )
     }
 }

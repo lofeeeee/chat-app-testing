@@ -380,6 +380,8 @@ class AppState(
             writeLocalString(NOTIFY_PREVIEWS, value.toString())
         }
 
+    var notifySound by mutableStateOf(true)
+
     /**
      * The channel you were last reading in each server, so switching back lands where you left.
      *

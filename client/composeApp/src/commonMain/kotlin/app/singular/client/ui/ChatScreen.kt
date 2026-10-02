@@ -1,5 +1,9 @@
 package app.singular.client.ui
 
+/**
+ * Main chat screen: sidebar, conversation pane, profile bar, and floating panels.
+ */
+
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -44,11 +48,15 @@ import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.AmpStories
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -445,6 +453,8 @@ private fun ConversationList(state: AppState, onNewGroup: () -> Unit) {
         return
     }
 
+    var filter by remember { mutableStateOf("") }
+
     // A resolver for the sidebar, built from the people in your conversations. The message
     // list has a richer one (it also knows message authors and the open server's roles), but
     // the sidebar can't reach that — and a preview reading `You: <@221239599735771136>` is not
@@ -461,24 +471,44 @@ private fun ConversationList(state: AppState, onNewGroup: () -> Unit) {
         )
     }
 
-    LazyColumn(Modifier.fillMaxSize()) {
-        items(state.channels, key = { it.id }) { channel ->
-            // animateItem() is LazyItemScope-scoped — it must live inside the item lambda.
-            val itemMod = if (LocalReducedMotion.current) Modifier else Modifier.animateItem()
-            Box(itemMod) {
-                DirectMessageRow(
-                    channel = channel,
-                    selfId = state.currentUser?.id,
-                    status = channel.members.firstOrNull { it.id != state.currentUser?.id }
-                        ?.let(state::statusOf) ?: "OFFLINE",
-                    preview = state.lastMessages[channel.id]
-                        ?.preview(state.currentUser?.id, previewResolver::displayFor),
-                    muted = state.mutedChannels[channel.id] == true,
-                    unread = state.unread[channel.id] == true,
-                    mentions = state.mentionCounts[channel.id] ?: 0,
-                    selected = channel.id == state.selectedChannel?.id,
-                    onClick = { state.openChannel(channel) },
+    val filtered = if (filter.isBlank()) state.channels else state.channels.filter {
+        it.title(state.currentUser?.id).contains(filter, ignoreCase = true)
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        if (state.channels.size > 5) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                OutlinedTextField(
+                    value = filter,
+                    onValueChange = { filter = it },
+                    placeholder = { Text("Search conversations") },
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = SingularShapes.small,
+                    modifier = Modifier.fillMaxWidth(),
                 )
+            }
+        }
+
+        LazyColumn(Modifier.weight(1f)) {
+            items(filtered, key = { it.id }) { channel ->
+                // animateItem() is LazyItemScope-scoped — it must live inside the item lambda.
+                val itemMod = if (LocalReducedMotion.current) Modifier else Modifier.animateItem()
+                Box(itemMod) {
+                    DirectMessageRow(
+                        channel = channel,
+                        selfId = state.currentUser?.id,
+                        status = channel.otherMember(state.currentUser?.id)
+                            ?.let(state::statusOf) ?: "OFFLINE",
+                        preview = state.lastMessages[channel.id]
+                            ?.preview(state.currentUser?.id, previewResolver::displayFor),
+                        muted = state.mutedChannels[channel.id] == true,
+                        unread = state.unread[channel.id] == true,
+                        mentions = state.mentionCounts[channel.id] ?: 0,
+                        selected = channel.id == state.selectedChannel?.id,
+                        onClick = { state.openChannel(channel) },
+                    )
+                }
             }
         }
     }
@@ -597,27 +627,24 @@ private fun DirectMessageRow(
     selected: Boolean,
     onClick: () -> Unit,
 ) {
-    val other = channel.members.firstOrNull { it.id != selfId }
+    val other = channel.otherMember(selfId)
     Row(
         Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .background(
-                if (selected) MaterialTheme.colorScheme.surfaceVariant
-                else MaterialTheme.colorScheme.surface
-            )
-            .padding(horizontal = 12.dp, vertical = 9.dp),
+            .background(selectedBackground(selected))
+            .padding(horizontal = Spacing.xl, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (other != null) AvatarWithStatus(other, status, 34)
-        else Avatar(channel.id, channel.name ?: "#", 34)
+        if (other != null) AvatarWithStatus(other, status, AvatarSize.row.value.toInt())
+        else Avatar(channel.id, channel.name ?: "#", AvatarSize.row.value.toInt())
 
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(Spacing.lg))
         Column(Modifier.weight(1f)) {
             Text(
                 channel.title(selfId),
                 style = MaterialTheme.typography.bodyMedium,
-                fontWeight = if (selected || unread) FontWeight.SemiBold else FontWeight.Normal,
+                fontWeight = emphasisWeight(selected || unread),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -633,20 +660,7 @@ private fun DirectMessageRow(
             )
         }
 
-        // The badge replaces the plain dot when there is one: two marks on the same row
-        // compete, and the red one is strictly more informative.
-        if (mentions > 0) {
-            MentionBadge(mentions)
-            Spacer(Modifier.width(4.dp))
-        } else if (unread) {
-            Box(
-                Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.onSurface)
-            )
-            Spacer(Modifier.width(4.dp))
-        }
+        UnreadIndicator(unread = unread, mentions = mentions)
         if (muted) {
             Icon(
                 Icons.Filled.NotificationsOff,
@@ -690,11 +704,40 @@ private fun GuildChannelList(
 
     val categories = guild.channels.filter { it.isCategory }.sortedBy { it.name }
     val text = guild.channels.filter { it.type == "GUILD_TEXT" }
-    val grouped = text.groupBy { it.parentId }
+    var filter by remember(guild.id) { mutableStateOf("") }
+    val filteredText = if (filter.isBlank()) text else text.filter {
+        it.name?.contains(filter, ignoreCase = true) == true
+    }
+    val grouped = filteredText.groupBy { it.parentId }
 
     Column(Modifier.fillMaxSize()) {
         GuildHeader(state, guild, onOpenServerSettings)
         HorizontalDivider()
+
+        if (text.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                EmptyState(
+                    icon = Icons.AutoMirrored.Filled.Chat,
+                    title = "No channels yet",
+                    hint = "This server has no text channels. Create one in server settings.",
+                )
+            }
+            return
+        }
+
+        if (text.size > 5) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                OutlinedTextField(
+                    value = filter,
+                    onValueChange = { filter = it },
+                    placeholder = { Text("Search channels") },
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = SingularShapes.small,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
 
         LazyColumn(Modifier.weight(1f)) {
             // Uncategorised first — in a server with no categories at all, this is the
@@ -711,14 +754,17 @@ private fun GuildChannelList(
             }
 
             categories.forEach { category ->
-                channelGroup(
-                    id = category.id,
-                    label = category.name ?: "Channels",
-                    channels = grouped[category.id].orEmpty(),
-                    state = state,
-                    isCollapsed = category.id in hidden,
-                    onToggle = { toggle(collapsed, category.id) },
-                )
+                val channels = grouped[category.id].orEmpty()
+                if (filter.isBlank() || channels.isNotEmpty()) {
+                    channelGroup(
+                        id = category.id,
+                        label = category.name ?: "Channels",
+                        channels = channels,
+                        state = state,
+                        isCollapsed = category.id in hidden,
+                        onToggle = { toggle(collapsed, category.id) },
+                    )
+                }
             }
         }
     }
@@ -819,15 +865,8 @@ private fun GuildChannelRow(
             .padding(horizontal = 8.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Brighter on dark, darker on light: `onSurface` is the high-contrast ink in both
-        // modes and `onSurfaceVariant` the muted one, so one expression covers both themes.
-        val ink =
-            if (selected || unread) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.onSurfaceVariant
+        val ink = emphasisColor(selected || unread)
 
-        // The hash is drawn as text at the same size as the name, so it reads as part of the
-        // channel's name the way it does everywhere else this convention is used. It brightens
-        // with the name — leaving it muted made an unread channel look half-lit.
         Text(
             "#",
             style = MaterialTheme.typography.bodyMedium,
@@ -838,7 +877,7 @@ private fun GuildChannelRow(
         Text(
             channel.name.orEmpty(),
             style = MaterialTheme.typography.bodyMedium,
-            fontWeight = if (selected || unread) FontWeight.SemiBold else FontWeight.Normal,
+            fontWeight = emphasisWeight(selected || unread),
             color = ink,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -852,15 +891,7 @@ private fun GuildChannelRow(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
-            // The badge replaces the plain dot when there is one — two marks for the same row
-            // compete, and the red one is strictly more informative.
-            if (mentions > 0) MentionBadge(mentions)
-            else if (unread) {
-                Box(
-                    Modifier.size(7.dp).clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.onSurface)
-                )
-            }
+            UnreadIndicator(unread = unread, mentions = mentions)
         }
     }
 }
@@ -1046,7 +1077,7 @@ private fun Conversation(
     }
 
     val channel = state.selectedChannel ?: return
-    val other = channel.members.firstOrNull { it.id != state.currentUser?.id }
+    val other = channel.otherMember(state.currentUser?.id)
     var draft by remember(channel.id) { mutableStateOf(drafts[channel.id].orEmpty()) }
     LaunchedEffect(channel.id, draft) {
         drafts[channel.id] = draft
@@ -1068,6 +1099,18 @@ private fun Conversation(
     // a channel switch abandons it. Kept per channel with the drafts so switching conversations
     // can't commit an edit into the wrong chat — the same bug drafts exist to prevent.
     var editingMessage by remember(channel.id) { mutableStateOf<MessageDto?>(null) }
+    var replyingTo by remember(channel.id) { mutableStateOf<MessageDto?>(null) }
+    var messageToDelete by remember(channel.id) { mutableStateOf<MessageDto?>(null) }
+
+    messageToDelete?.let { msg ->
+        DeleteMessageDialog(
+            onDismiss = { messageToDelete = null },
+            onConfirm = {
+                messageToDelete = null
+                state.deleteMessage(msg.id)
+            },
+        )
+    }
 
     // Entering edit mode seeds the field with the message's current text. A separate effect
     // rather than doing it at the call site, because the long-press sheet only sets the state;
@@ -1213,19 +1256,23 @@ private fun Conversation(
                     )
                 }
             }
-            other?.let { AvatarWithStatus(it, state.statusOf(it), 32) }
-            Spacer(Modifier.width(10.dp))
+            other?.let { AvatarWithStatus(it, state.statusOf(it), AvatarSize.sm.value.toInt()) }
+            Spacer(Modifier.width(Spacing.lg))
             Column(Modifier.weight(1f)) {
                 Text(
                     channel.title(state.currentUser?.id),
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 other?.let {
                     Text(
                         statusLabel(state.statusOf(it)),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -1252,12 +1299,14 @@ private fun Conversation(
                 )
             }
 
-            other?.let { person ->
-                TextButton(onClick = {
-                    if (person.blockedByViewer) state.unblockUser(person.id)
-                    else state.blockUser(person.id)
-                }) {
-                    Text(if (person.blockedByViewer) "Unblock" else "Block")
+            if (!showBack) {
+                other?.let { person ->
+                    TextButton(onClick = {
+                        if (person.blockedByViewer) state.unblockUser(person.id)
+                        else state.blockUser(person.id)
+                    }) {
+                        Text(if (person.blockedByViewer) "Unblock" else "Block")
+                    }
                 }
             }
         }
@@ -1313,7 +1362,10 @@ private fun Conversation(
                     listState = listState,
                     resolver = resolver,
                     onReact = { messageId, emoji -> state.toggleReaction(messageId, emoji) },
-                    onMessageLongPress = { message -> pickerTarget = message.id },
+                    onMessageLongPress = { message ->
+                        pickerTarget = message.id
+                        replyingTo = message
+                    },
                     modifier = Modifier.fillMaxSize(),
                     isPending = { state.isPending(it) },
                     isFailed = { state.isFailedSend(it) },
@@ -1378,6 +1430,40 @@ private fun Conversation(
         // would sit there after the reconnect already succeeded.
 
         HorizontalDivider()
+
+        replyingTo?.let { replyMsg ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier.width(3.dp).height(32.dp)
+                        .background(MaterialTheme.colorScheme.primary)
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Replying to ${replyMsg.author.label}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        replyMsg.content?.take(80).orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(onClick = { replyingTo = null }) {
+                    Icon(Icons.Filled.Close, contentDescription = "Cancel reply", modifier = Modifier.size(16.dp))
+                }
+            }
+        }
 
         // -- Composer --------------------------------------------------------
 
@@ -1517,7 +1603,7 @@ private fun Conversation(
                                 },
                                 onDelete = {
                                     pickerTarget = null
-                                    state.deleteMessage(message.id)
+                                    messageToDelete = message
                                 },
                                 onTogglePin = {
                                     pickerTarget = null
@@ -1571,9 +1657,12 @@ private fun Conversation(
                             },
                             placeholder = {
                                 Text(
-                                    if (state.enterToSend) "Message  ·  @ to mention · Shift+Enter for a new line"
+                                    if (showBack) "Message"
+                                    else if (state.enterToSend) "Message  ·  @ to mention · Shift+Enter for a new line"
                                     else "Message  ·  @ to mention · Enter for a new line",
                                     color = LocalSingularColors.current.textFaint,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             },
                             modifier = Modifier
@@ -1763,7 +1852,7 @@ private fun Conversation(
                         // The bundled font, not the OS's: the picker this button opens draws
                         // Twemoji, and the button itself drawing Segoe/Apple/Noto made the two
                         // disagree about what the same emoji looks like.
-                        Text("😀", fontSize = 22.sp, fontFamily = emojiFontFamily())
+                        Text("😀", fontSize = EmojiSize.picker, fontFamily = emojiFontFamily())
                     }
                     IconButton(
                         onClick = { state.attachAndSend(draft); draft = "" },
@@ -1842,7 +1931,7 @@ private fun ReactionSheet(
                     Text(
                         emoji,
                         fontFamily = font,
-                        fontSize = 24.sp,
+                        fontSize = EmojiSize.status,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .clickable { onPick(emoji) }
@@ -1905,6 +1994,32 @@ class MessageSheetActions(
     val onTogglePin: () -> Unit,
     val onCopy: (() -> Unit)? = null,
 )
+
+@Composable
+private fun DeleteMessageDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete message?") },
+        text = {
+            DialogKeys(onDismiss = onDismiss) {
+                Text(
+                    "Are you sure you want to delete this message? This action cannot be undone.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                ),
+            ) { Text("Delete") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
 
 /**
  * "Orbit is typing" with three pulsing dots.
@@ -1988,10 +2103,9 @@ private fun SkeletonMessages() {
 }
 
 /**
- * The sidebar's drag handle: 10dp wide, visually a 1dp hairline, cursor changes on hover.
- *
- * The width is persisted per device (`AppState.sidebarWidthDp`) — a 13-inch laptop and a
- * 34-inch monitor want different answers, and that's exactly why this isn't a synced setting.
+ * The sidebar's drag handle: 10dp wide, visually a 1dp hairline that thickens and
+ * recolours on hover. Three dots in the centre give it a visible grip affordance —
+ * the previous version was invisible until hovered, which reads as no handle at all.
  */
 @Composable
 private fun ResizableDivider(widthDp: Int, onResize: (Int) -> Unit) {
@@ -2012,13 +2126,12 @@ private fun ResizableDivider(widthDp: Int, onResize: (Int) -> Unit) {
                 ) { change, dragAmount ->
                     change.consume()
                     accumulated += dragAmount.x
-                    // Deltas arrive in pixels; the width is in dp. The density is read at
-                    // composition time, which is the frame the pointer is in.
                     onResize(startWidth + (accumulated / density.density).toInt())
                 }
             },
         contentAlignment = Alignment.Center,
     ) {
+        // The line
         Box(
             Modifier
                 .width(if (hover) 2.dp else 1.dp)
@@ -2028,6 +2141,23 @@ private fun ResizableDivider(widthDp: Int, onResize: (Int) -> Unit) {
                     else MaterialTheme.colorScheme.outline
                 )
         )
+        // Grip dots — three small circles stacked vertically, visible only on hover.
+        // Gives a visual clue that this edge is draggable without cluttering the rest.
+        if (hover) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                repeat(3) {
+                    Box(
+                        Modifier
+                            .size(3.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
+                    )
+                }
+            }
+        }
     }
 }
 
