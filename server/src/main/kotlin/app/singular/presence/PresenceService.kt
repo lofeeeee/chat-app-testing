@@ -112,6 +112,18 @@ class PresenceService(
     }
 
     /**
+     * Publishes a presence-change prompt for [userId] without changing desired status.
+     *
+     * Used by the socket lifecycle edges (see `AuthInterceptor`): connect/disconnect are
+     * themselves liveness events now, and the prompt-to-recheck model means publishing here
+     * is safe even when the user holds other sockets — the recheck resolves to the same
+     * verdict, so a superfluous event costs one recomputation, never a wrong one.
+     */
+    fun publishPresenceChanged(userId: Long) {
+        publishChange(userId)
+    }
+
+    /**
      * The stream other clients subscribe to. The event itself is only a prompt to recheck (see
      * class doc), so the resolved Presence is computed here, on arrival, rather than being
      * carried inside the event: that keeps two nodes connected to the same user from ever

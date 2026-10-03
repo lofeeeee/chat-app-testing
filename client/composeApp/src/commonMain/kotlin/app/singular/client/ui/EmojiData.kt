@@ -71,21 +71,31 @@ fun emojiFor(category: EmojiCategory): List<EmojiEntry> = when (category) {
 /**
  * Search: shortcode prefix first, then word-part. Synchronous by design — a few hundred
  * entries scan faster than any index's lookup overhead.
+ *
+ * Prefix hits are collected with an early bail once [limit] of them exist (the common query
+ * shape — "smi" — is satisfied by the first few dozen entries of the table), and only the
+ * candidate set is sorted, never the whole table. A contains-scan still runs to backfill
+ * when prefixes alone don't fill the limit, but it can stop the moment the result is full.
  */
 fun searchEmoji(query: String, limit: Int = 48): List<EmojiEntry> {
     val q = query.trim().lowercase()
     if (q.isEmpty()) return emptyList()
-    return ALL_EMOJI
-        .mapNotNull { entry ->
-            when {
-                entry.name.startsWith(q) -> 0
-                entry.name.contains(q) -> 1
-                else -> null
-            }?.let { rank -> rank to entry }
+
+    val prefixHits = ArrayList<EmojiEntry>(limit.coerceAtMost(32))
+    val otherHits = ArrayList<EmojiEntry>()
+    outer@ for (entry in ALL_EMOJI) {
+        when {
+            entry.name.startsWith(q) -> {
+                prefixHits += entry
+                if (prefixHits.size >= limit) break@outer
+            }
+            otherHits.size < limit && entry.name.contains(q) -> otherHits += entry
         }
-        .sortedWith(compareBy({ it.first }, { it.second.name }))
-        .take(limit)
-        .map { it.second }
+    }
+
+    prefixHits.sortBy { it.name }
+    otherHits.sortBy { it.name }
+    return (prefixHits + otherHits).take(limit)
 }
 
 /**
@@ -853,7 +863,8 @@ private val SYMBOLS = listOf(
     EmojiEntry("⏏️", "eject"),
     EmojiEntry("🎬", "clapper"),
     EmojiEntry("📶", "signal"),
-    EmojiEntry("🛜", "wifi"),
+    // No "wifi" glyph: the nearest one (U+1F6DC) is a Unicode 15 addition and the bundled
+    // Twemoji build covers Unicode 14 — it would render as tofu. "signal" covers the intent.
     EmojiEntry("♀️", "female"),
     EmojiEntry("♂️", "male"),
     EmojiEntry("✖️", "x"),

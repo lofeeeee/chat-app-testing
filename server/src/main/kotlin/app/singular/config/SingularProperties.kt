@@ -12,6 +12,16 @@ data class SingularProperties(
      * errors on insert if you are lucky, and as silently overwritten rows if you are not.
      */
     val nodeId: Long = 1,
+    /**
+     * Trust `X-Forwarded-For` / `X-Real-IP` as the client's real address. Set this ONLY when
+     * the server sits behind a reverse proxy that overwrites (not appends to) those headers.
+     *
+     * Default false — the fail-safe direction. With it off, an exposed deployment's
+     * IP-keyed rate limits key on the socket address, which an attacker cannot spoof; with
+     * it wrongly on, every request can mint a fresh rate-limit identity by setting the
+     * header. See `ClientInfoResolver.trustProxy`.
+     */
+    val trustProxy: Boolean = false,
     val auth: Auth = Auth(),
     val crypto: Crypto = Crypto(),
     val limits: Limits = Limits(),
@@ -91,6 +101,14 @@ data class SingularProperties(
     data class Media(
         val maxUploadBytes: Long = 100L * 1024 * 1024,
         val maxImageBytes: Long = 25L * 1024 * 1024,
+        /**
+         * Cap on either decoded image edge, checked before decoding. This is the
+         * decompression-bomb guard: [maxUploadBytes] bounds the *compressed* bytes, and a
+         * tiny file can still declare gigantic dimensions. 8192 comfortably covers phone
+         * and camera output (4K is 3840) while keeping a hostile decode under ~270 MB of
+         * ARGB in the worst case rather than gigabytes.
+         */
+        val maxImageEdge: Int = 8192,
         val thumbnailMaxEdge: Int = 320,
         val storyTtl: Duration = Duration.ofHours(24),
     )

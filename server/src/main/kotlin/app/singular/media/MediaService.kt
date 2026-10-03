@@ -160,6 +160,42 @@ class MediaService(
     private data class ProcessedImage(val width: Int, val height: Int, val thumbnailKey: String?)
 
     /**
+     * Decodes an image, refusing to allocate for absurd dimensions first.
+     *
+     * A 100 KB PNG can declare itself 50000×50000; `ImageIO.read` would happily try to allocate
+     * the ~10 GB that needs, on a request thread, from bytes that passed the upload size
+     * limit — because that limit constrains the *compressed* payload, not the decoded pixels.
+     * The decoder bomb is the classic image-pipeline DoS and this cap is the classic fix:
+     * read the header's width/height (which costs nothing to parse) and only then decode.
+     *
+     * Dimension-reading needs the same care as decoding: a malformed file can make the reader
+     * throw or loop, so every step is wrapped by the caller's `runCatching`.
+     */
+    private fun readCappedImage(bytes: ByteArray, attachmentId: Long): BufferedImage? {
+        val readers = ImageIO.getImageReaders(ImageIO.createImageInputStream(bytes))
+        if (!readers.hasNext()) return null
+        val reader = readers.next()
+
+        reader.input = ImageIO.createImageInputStream(bytes)
+        try {
+            val width = reader.getWidth(0)
+            val height = reader.getHeight(0)
+
+            if (width > maxImageEdge || height > maxImageEdge) {
+                LOG.warn(
+                    "Attachment {} declared {}x{} — over the {}px cap, refusing to decode",
+                    attachmentId, width, height, maxImageEdge,
+                )
+                return null
+            }
+
+            return reader.read(0)
+        } finally {
+            reader.dispose()
+        }
+    }
+
+    /**
      * Strips metadata and builds a thumbnail.
      *
      * **EXIF stripping is not cosmetic.** Phone cameras embed GPS coordinates in JPEGs by
@@ -176,7 +212,7 @@ class MediaService(
     private fun processImage(attachment: Attachment): ProcessedImage? {
         val bytes = storage.download(attachment.objectKey) ?: return null
 
-        val image = runCatching { ImageIO.read(ByteArrayInputStream(bytes)) }.getOrNull()
+        val image = runCatching { readCappedImage(bytes, attachment.id) }.getOrNull()
         if (image == null) {
             // Declared image/*, but not decodable. Left as an opaque file rather than trusted:
             // serving it as an image is how a malformed payload reaches an image decoder.
@@ -280,4 +316,7 @@ class MediaService(
     private companion object {
         val LOG = LoggerFactory.getLogger(MediaService::class.java)!!
     }
+
+    /** Decode-edge ceiling from config — see [SingularProperties.Media.maxImageEdge]. */
+    private val maxImageEdge: Int get() = props.media.maxImageEdge
 }

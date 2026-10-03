@@ -39,7 +39,7 @@ fun EmptyState(
     onAction: (() -> Unit)? = null,
 ) {
     Column(
-        modifier.padding(28.dp).fillMaxWidth(),
+        modifier.padding(Spacing.screen).fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
@@ -49,13 +49,13 @@ fun EmptyState(
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
             modifier = Modifier.size(40.dp),
         )
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(Spacing.xl))
         Text(
             title,
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface,
         )
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(Spacing.xs))
         Text(
             hint,
             style = MaterialTheme.typography.bodySmall,
@@ -63,7 +63,7 @@ fun EmptyState(
             textAlign = TextAlign.Center,
         )
         if (actionLabel != null && onAction != null) {
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(Spacing.lg))
             TextButton(onClick = onAction) { Text(actionLabel) }
         }
     }

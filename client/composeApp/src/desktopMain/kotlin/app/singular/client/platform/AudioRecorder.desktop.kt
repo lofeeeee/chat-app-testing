@@ -280,6 +280,23 @@ actual class AudioPlayer {
         watcher = null
         position = 0f
     }
+
+    actual fun seekTo(seconds: Float) {
+        // Reaches the clip through the current [Playback] rather than a `clip` field, and
+        // reports through the private `position` backing field — this class keeps its playback
+        // state read-only from the outside, so neither of the names this was first written
+        // against exists any more.
+        val c = current?.clip ?: return
+        val frameRate = c.format.frameRate.takeIf { it > 0f } ?: return
+        runCatching {
+            // Bounded by the clip's own frame count. The bound this replaces was
+            // `microsecondLength / 1000 * frameRate` — milliseconds multiplied by frames per
+            // second, which is a thousand times too many frames, so it clamped nothing.
+            val frame = (seconds * frameRate).toLong().coerceIn(0L, c.frameLength.toLong())
+            c.framePosition = frame.toInt()
+            position = c.microsecondPosition / 1_000_000f
+        }
+    }
 }
 
 /** A minimal RIFF/WAVE header around 16-bit mono PCM. Forty-four bytes, no dependencies. */

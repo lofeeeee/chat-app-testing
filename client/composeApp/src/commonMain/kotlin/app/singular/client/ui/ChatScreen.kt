@@ -1,5 +1,9 @@
 package app.singular.client.ui
 
+/**
+ * Main chat screen: sidebar, conversation pane, profile bar, and floating panels.
+ */
+
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -44,11 +48,15 @@ import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.AmpStories
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -87,12 +95,14 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.ui.input.key.Key
 import kotlinx.coroutines.launch
+import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -173,6 +183,21 @@ fun ChatScreen(
             when {
                 event.isPress && event.key == Key.Escape && state.selectedChannel != null -> {
                     state.closeChannel(); true
+                }
+                // Type-anywhere → composer (the chat-client convention): a plain printable
+                // keystroke with no Ctrl/Cmd/Alt chord puts the composer in focus and — by
+                // returning false — lets this same event propagate into the now-focused
+                // field, so the character the user pressed lands in the message box.
+                // Pressing "h" types an "h", not just focuses.
+                //
+                // Shift is allowed through: Shift+letter is how capitals are typed, and the
+                // picker's Shift-to-keep-open modifier only matters while the picker holds
+                // the clicks — a key event while the popup is up still belongs to the draft
+                // field the popup is anchored to.
+                event.isPress && state.selectedChannel != null && !event.isCommand &&
+                    !event.isAltPressed && event.key.isPlainTypingKey() -> {
+                    runCatching { composerFocus.requestFocus() }
+                    false
                 }
                 handleNavigationShortcut(
                     event,
@@ -428,6 +453,8 @@ private fun ConversationList(state: AppState, onNewGroup: () -> Unit) {
         return
     }
 
+    var filter by remember { mutableStateOf("") }
+
     // A resolver for the sidebar, built from the people in your conversations. The message
     // list has a richer one (it also knows message authors and the open server's roles), but
     // the sidebar can't reach that — and a preview reading `You: <@221239599735771136>` is not
@@ -444,24 +471,44 @@ private fun ConversationList(state: AppState, onNewGroup: () -> Unit) {
         )
     }
 
-    LazyColumn(Modifier.fillMaxSize()) {
-        items(state.channels, key = { it.id }) { channel ->
-            // animateItem() is LazyItemScope-scoped — it must live inside the item lambda.
-            val itemMod = if (LocalReducedMotion.current) Modifier else Modifier.animateItem()
-            Box(itemMod) {
-                DirectMessageRow(
-                    channel = channel,
-                    selfId = state.currentUser?.id,
-                    status = channel.members.firstOrNull { it.id != state.currentUser?.id }
-                        ?.let(state::statusOf) ?: "OFFLINE",
-                    preview = state.lastMessages[channel.id]
-                        ?.preview(state.currentUser?.id, previewResolver::displayFor),
-                    muted = state.mutedChannels[channel.id] == true,
-                    unread = state.unread[channel.id] == true,
-                    mentions = state.mentionCounts[channel.id] ?: 0,
-                    selected = channel.id == state.selectedChannel?.id,
-                    onClick = { state.openChannel(channel) },
+    val filtered = if (filter.isBlank()) state.channels else state.channels.filter {
+        it.title(state.currentUser?.id).contains(filter, ignoreCase = true)
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        if (state.channels.size > 5) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                OutlinedTextField(
+                    value = filter,
+                    onValueChange = { filter = it },
+                    placeholder = { Text("Search conversations") },
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = SingularShapes.small,
+                    modifier = Modifier.fillMaxWidth(),
                 )
+            }
+        }
+
+        LazyColumn(Modifier.weight(1f)) {
+            items(filtered, key = { it.id }) { channel ->
+                // animateItem() is LazyItemScope-scoped — it must live inside the item lambda.
+                val itemMod = if (LocalReducedMotion.current) Modifier else Modifier.animateItem()
+                Box(itemMod) {
+                    DirectMessageRow(
+                        channel = channel,
+                        selfId = state.currentUser?.id,
+                        status = channel.otherMember(state.currentUser?.id)
+                            ?.let(state::statusOf) ?: "OFFLINE",
+                        preview = state.lastMessages[channel.id]
+                            ?.preview(state.currentUser?.id, previewResolver::displayFor),
+                        muted = state.mutedChannels[channel.id] == true,
+                        unread = state.unread[channel.id] == true,
+                        mentions = state.mentionCounts[channel.id] ?: 0,
+                        selected = channel.id == state.selectedChannel?.id,
+                        onClick = { state.openChannel(channel) },
+                    )
+                }
             }
         }
     }
@@ -580,27 +627,24 @@ private fun DirectMessageRow(
     selected: Boolean,
     onClick: () -> Unit,
 ) {
-    val other = channel.members.firstOrNull { it.id != selfId }
+    val other = channel.otherMember(selfId)
     Row(
         Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .background(
-                if (selected) MaterialTheme.colorScheme.surfaceVariant
-                else MaterialTheme.colorScheme.surface
-            )
-            .padding(horizontal = 12.dp, vertical = 9.dp),
+            .background(selectedBackground(selected))
+            .padding(horizontal = Spacing.xl, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (other != null) AvatarWithStatus(other, status, 34)
-        else Avatar(channel.id, channel.name ?: "#", 34)
+        if (other != null) AvatarWithStatus(other, status, AvatarSize.row.value.toInt())
+        else Avatar(channel.id, channel.name ?: "#", AvatarSize.row.value.toInt())
 
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(Spacing.lg))
         Column(Modifier.weight(1f)) {
             Text(
                 channel.title(selfId),
                 style = MaterialTheme.typography.bodyMedium,
-                fontWeight = if (selected || unread) FontWeight.SemiBold else FontWeight.Normal,
+                fontWeight = emphasisWeight(selected || unread),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -616,20 +660,7 @@ private fun DirectMessageRow(
             )
         }
 
-        // The badge replaces the plain dot when there is one: two marks on the same row
-        // compete, and the red one is strictly more informative.
-        if (mentions > 0) {
-            MentionBadge(mentions)
-            Spacer(Modifier.width(4.dp))
-        } else if (unread) {
-            Box(
-                Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.onSurface)
-            )
-            Spacer(Modifier.width(4.dp))
-        }
+        UnreadIndicator(unread = unread, mentions = mentions)
         if (muted) {
             Icon(
                 Icons.Filled.NotificationsOff,
@@ -673,11 +704,40 @@ private fun GuildChannelList(
 
     val categories = guild.channels.filter { it.isCategory }.sortedBy { it.name }
     val text = guild.channels.filter { it.type == "GUILD_TEXT" }
-    val grouped = text.groupBy { it.parentId }
+    var filter by remember(guild.id) { mutableStateOf("") }
+    val filteredText = if (filter.isBlank()) text else text.filter {
+        it.name?.contains(filter, ignoreCase = true) == true
+    }
+    val grouped = filteredText.groupBy { it.parentId }
 
     Column(Modifier.fillMaxSize()) {
         GuildHeader(state, guild, onOpenServerSettings)
         HorizontalDivider()
+
+        if (text.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                EmptyState(
+                    icon = Icons.AutoMirrored.Filled.Chat,
+                    title = "No channels yet",
+                    hint = "This server has no text channels. Create one in server settings.",
+                )
+            }
+            return
+        }
+
+        if (text.size > 5) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                OutlinedTextField(
+                    value = filter,
+                    onValueChange = { filter = it },
+                    placeholder = { Text("Search channels") },
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = SingularShapes.small,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
 
         LazyColumn(Modifier.weight(1f)) {
             // Uncategorised first — in a server with no categories at all, this is the
@@ -694,14 +754,17 @@ private fun GuildChannelList(
             }
 
             categories.forEach { category ->
-                channelGroup(
-                    id = category.id,
-                    label = category.name ?: "Channels",
-                    channels = grouped[category.id].orEmpty(),
-                    state = state,
-                    isCollapsed = category.id in hidden,
-                    onToggle = { toggle(collapsed, category.id) },
-                )
+                val channels = grouped[category.id].orEmpty()
+                if (filter.isBlank() || channels.isNotEmpty()) {
+                    channelGroup(
+                        id = category.id,
+                        label = category.name ?: "Channels",
+                        channels = channels,
+                        state = state,
+                        isCollapsed = category.id in hidden,
+                        onToggle = { toggle(collapsed, category.id) },
+                    )
+                }
             }
         }
     }
@@ -802,15 +865,8 @@ private fun GuildChannelRow(
             .padding(horizontal = 8.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Brighter on dark, darker on light: `onSurface` is the high-contrast ink in both
-        // modes and `onSurfaceVariant` the muted one, so one expression covers both themes.
-        val ink =
-            if (selected || unread) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.onSurfaceVariant
+        val ink = emphasisColor(selected || unread)
 
-        // The hash is drawn as text at the same size as the name, so it reads as part of the
-        // channel's name the way it does everywhere else this convention is used. It brightens
-        // with the name — leaving it muted made an unread channel look half-lit.
         Text(
             "#",
             style = MaterialTheme.typography.bodyMedium,
@@ -821,7 +877,7 @@ private fun GuildChannelRow(
         Text(
             channel.name.orEmpty(),
             style = MaterialTheme.typography.bodyMedium,
-            fontWeight = if (selected || unread) FontWeight.SemiBold else FontWeight.Normal,
+            fontWeight = emphasisWeight(selected || unread),
             color = ink,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -835,15 +891,7 @@ private fun GuildChannelRow(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
-            // The badge replaces the plain dot when there is one — two marks for the same row
-            // compete, and the red one is strictly more informative.
-            if (mentions > 0) MentionBadge(mentions)
-            else if (unread) {
-                Box(
-                    Modifier.size(7.dp).clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.onSurface)
-                )
-            }
+            UnreadIndicator(unread = unread, mentions = mentions)
         }
     }
 }
@@ -980,17 +1028,62 @@ private fun Conversation(
     /** True when this pane replaced the sidebar, so it must offer a way back to it. */
     showBack: Boolean = false,
 ) {
-    // Drafts are kept per channel: one shared `remember` meant switching chats carried the
-    // half-written message into the wrong conversation, and a bare `remember(channel.id)`
-    // meant leaving and returning threw it away. The map gives each channel its own draft for
-    // as long as this screen is alive.
+    // Drafts are kept per channel and PERSISTED across restarts: one shared `remember` meant
+    // switching chats carried the half-written message into the wrong conversation, and a
+    // screen-lifetime map meant a crash or relaunch threw away what you were typing. The
+    // map still lives here (instant reads); a debounced job mirrors it to local storage so
+    // the next launch restores every half-written message.
+    //
+    // One key per channel, capped: an account in dozens of servers doesn't need last
+    // year's drafts, and unbounded growth in local storage is how an app rots.
     val drafts = remember { mutableStateMapOf<String, String>() }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+
+    // Mirror drafts to local storage, debounced: a write per keystroke would burn the flash
+    // for nothing — half a second after typing stops is equally durable for a draft. Blank
+    // drafts ARE written (as empty strings) so sending a message erases its stored draft;
+    // the restore side filters blanks out.
+    // Channels whose drafts were actually edited this session (versus merely seeded).
+    val touchedChannels = remember { mutableStateMapOf<String, Boolean>() }
+
+    var draftWriteJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    fun persistDrafts() {
+        draftWriteJob?.cancel()
+        draftWriteJob = scope.launch {
+            kotlinx.coroutines.delay(500)
+            drafts.entries
+                // Channels the user actually touched this session — a map full of
+                // never-typed defaults would erase drafts from other sessions.
+                .filter { it.key in touchedChannels }
+                .take(20)
+                .forEach { (channelId, text) ->
+                    app.singular.client.platform.writeLocalString("draft:$channelId", text)
+                }
+        }
+    }
+
+    // Seed once from storage, across every channel the client knows — DMs and guilds both.
+    // Best-effort: an unreadable store means starting from nothing, like a fresh install.
+    LaunchedEffect(state.channels.size, state.guilds.size) {
+        (state.channels.asSequence() + state.guilds.asSequence().flatMap { it.channels.asSequence() })
+            .filter { it.id !in drafts || drafts[it.id].isNullOrBlank() }
+            .forEach { channel ->
+                app.singular.client.platform.readLocalString("draft:${channel.id}")?.let { saved ->
+                    if (saved.isNotBlank()) drafts[channel.id] = saved
+                }
+            }
+    }
+
     val channel = state.selectedChannel ?: return
-    val other = channel.members.firstOrNull { it.id != state.currentUser?.id }
+    val other = channel.otherMember(state.currentUser?.id)
     var draft by remember(channel.id) { mutableStateOf(drafts[channel.id].orEmpty()) }
-    LaunchedEffect(channel.id, draft) { drafts[channel.id] = draft }
+    LaunchedEffect(channel.id, draft) {
+        drafts[channel.id] = draft
+        touchedChannels[channel.id] = true
+        persistDrafts()
+    }
 
     // @-autocomplete state. The token is recomputed from the draft on every change; the
     // popup is shown exactly while a token is active and something matches it.
@@ -1006,6 +1099,18 @@ private fun Conversation(
     // a channel switch abandons it. Kept per channel with the drafts so switching conversations
     // can't commit an edit into the wrong chat — the same bug drafts exist to prevent.
     var editingMessage by remember(channel.id) { mutableStateOf<MessageDto?>(null) }
+    var replyingTo by remember(channel.id) { mutableStateOf<MessageDto?>(null) }
+    var messageToDelete by remember(channel.id) { mutableStateOf<MessageDto?>(null) }
+
+    messageToDelete?.let { msg ->
+        DeleteMessageDialog(
+            onDismiss = { messageToDelete = null },
+            onConfirm = {
+                messageToDelete = null
+                state.deleteMessage(msg.id)
+            },
+        )
+    }
 
     // Entering edit mode seeds the field with the message's current text. A separate effect
     // rather than doing it at the call site, because the long-press sheet only sets the state;
@@ -1083,6 +1188,31 @@ private fun Conversation(
             lastVisible >= state.messages.lastIndex - 2
         }
     }
+
+    // Scroll-up pagination: near the top, fetch the older page. `derivedStateOf` so this only
+    // recomputes when the *predicate* flips, not on every scroll pixel. The pin captures the
+    // pre-load indices from inside the effect, which runs while the list still shows the old
+    // content — a prepend lands page-size many items above the reader, and without the pin
+    // item 0 becoming item 50 would snap the view to the top of the new page.
+    val nearTop by remember {
+        derivedStateOf {
+            val first = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: 0
+            first <= 3
+        }
+    }
+    LaunchedEffect(nearTop, state.hasOlder, channel.id) {
+        if (nearTop && state.hasOlder && !state.loadingOlder && state.messages.isNotEmpty()) {
+            val previousFirst = listState.firstVisibleItemIndex
+            val previousOffset = listState.firstVisibleItemScrollOffset
+            val before = state.messages.size
+            state.loadOlder()
+            // loadOlder returns with the prepend landed — restore where the reader was,
+            // translated page-size deeper into the list.
+            val added = state.messages.size - before
+            if (added > 0) listState.scrollToItem(previousFirst + added, previousOffset)
+        }
+    }
+
     var unseenBelow by remember(channel.id) { mutableStateOf(0) }
     val lastSeenSize = remember(channel.id) { mutableStateOf(0) }
 
@@ -1126,19 +1256,23 @@ private fun Conversation(
                     )
                 }
             }
-            other?.let { AvatarWithStatus(it, state.statusOf(it), 32) }
-            Spacer(Modifier.width(10.dp))
+            other?.let { AvatarWithStatus(it, state.statusOf(it), AvatarSize.sm.value.toInt()) }
+            Spacer(Modifier.width(Spacing.lg))
             Column(Modifier.weight(1f)) {
                 Text(
                     channel.title(state.currentUser?.id),
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 other?.let {
                     Text(
                         statusLabel(state.statusOf(it)),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -1165,12 +1299,14 @@ private fun Conversation(
                 )
             }
 
-            other?.let { person ->
-                TextButton(onClick = {
-                    if (person.blockedByViewer) state.unblockUser(person.id)
-                    else state.blockUser(person.id)
-                }) {
-                    Text(if (person.blockedByViewer) "Unblock" else "Block")
+            if (!showBack) {
+                other?.let { person ->
+                    TextButton(onClick = {
+                        if (person.blockedByViewer) state.unblockUser(person.id)
+                        else state.blockUser(person.id)
+                    }) {
+                        Text(if (person.blockedByViewer) "Unblock" else "Block")
+                    }
                 }
             }
         }
@@ -1226,7 +1362,10 @@ private fun Conversation(
                     listState = listState,
                     resolver = resolver,
                     onReact = { messageId, emoji -> state.toggleReaction(messageId, emoji) },
-                    onMessageLongPress = { message -> pickerTarget = message.id },
+                    onMessageLongPress = { message ->
+                        pickerTarget = message.id
+                        replyingTo = message
+                    },
                     modifier = Modifier.fillMaxSize(),
                     isPending = { state.isPending(it) },
                     isFailed = { state.isFailedSend(it) },
@@ -1234,6 +1373,25 @@ private fun Conversation(
                         // The snackbar owns the retry prompt; tapping a failed message is a
                         // shortcut to the same place.
                         state.retryFailed(message)
+                    },
+                    onEditFailed = { message ->
+                        // Edit-instead-of-retry: the failed text goes back to the composer
+                        // and the placeholder goes away — the user is rewriting this send,
+                        // not re-issuing it.
+                        state.failedDraftOf(message.id)?.let { failedText ->
+                            state.discardFailed(message.id)
+                            editingMessage = null
+                            draft = failedText
+                            runCatching { composerFocus.requestFocus() }
+                        }
+                    },
+                    onJumpToDay = { targetDay ->
+                        scope.launch {
+                            state.loadUntilDay(targetDay)?.let { firstOfDay ->
+                                val index = state.messages.indexOfFirst { it.id == firstOfDay }
+                                if (index >= 0) listState.animateScrollToItem(index)
+                            }
+                        }
                     },
                 )
             }
@@ -1272,6 +1430,40 @@ private fun Conversation(
         // would sit there after the reconnect already succeeded.
 
         HorizontalDivider()
+
+        replyingTo?.let { replyMsg ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier.width(3.dp).height(32.dp)
+                        .background(MaterialTheme.colorScheme.primary)
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Replying to ${replyMsg.author.label}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        replyMsg.content?.take(80).orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(onClick = { replyingTo = null }) {
+                    Icon(Icons.Filled.Close, contentDescription = "Cancel reply", modifier = Modifier.size(16.dp))
+                }
+            }
+        }
 
         // -- Composer --------------------------------------------------------
 
@@ -1411,11 +1603,17 @@ private fun Conversation(
                                 },
                                 onDelete = {
                                     pickerTarget = null
-                                    state.deleteMessage(message.id)
+                                    messageToDelete = message
                                 },
                                 onTogglePin = {
                                     pickerTarget = null
                                     state.togglePin(message.id)
+                                },
+                                onCopy = message.content?.takeIf { it.isNotBlank() }?.let { text ->
+                                    {
+                                        pickerTarget = null
+                                        clipboard.setText(AnnotatedString(text))
+                                    }
                                 },
                             )
                         },
@@ -1459,8 +1657,12 @@ private fun Conversation(
                             },
                             placeholder = {
                                 Text(
-                                    "Message  ·  @ to mention · Shift+Enter for a new line",
+                                    if (showBack) "Message"
+                                    else if (state.enterToSend) "Message  ·  @ to mention · Shift+Enter for a new line"
+                                    else "Message  ·  @ to mention · Enter for a new line",
                                     color = LocalSingularColors.current.textFaint,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             },
                             modifier = Modifier
@@ -1506,8 +1708,13 @@ private fun Conversation(
                                         }
 
                                         !isEnter -> false
-                                        // Shift+Enter falls through so the field inserts the newline itself.
-                                        event.isShiftPressed -> false
+                                        // The invertible binding: Enter sends and Shift+Enter
+                                        // breaks the line by default; users from the
+                                        // terminal lineage (see Settings) flip it. The
+                                        // newline falls through either way, so the field
+                                        // inserts it itself.
+                                        state.enterToSend && event.isShiftPressed -> false
+                                        !state.enterToSend && !event.isShiftPressed -> false
                                         else -> {
                                             val editing = editingMessage
                                             if (editing != null) {
@@ -1642,7 +1849,10 @@ private fun Conversation(
                             pickerTarget = if (pickerTarget == "composer") null else "composer"
                         },
                     ) {
-                        Text("😀", fontSize = 22.sp)
+                        // The bundled font, not the OS's: the picker this button opens draws
+                        // Twemoji, and the button itself drawing Segoe/Apple/Noto made the two
+                        // disagree about what the same emoji looks like.
+                        Text("😀", fontSize = EmojiSize.picker, fontFamily = emojiFontFamily())
                     }
                     IconButton(
                         onClick = { state.attachAndSend(draft); draft = "" },
@@ -1721,7 +1931,7 @@ private fun ReactionSheet(
                     Text(
                         emoji,
                         fontFamily = font,
-                        fontSize = 24.sp,
+                        fontSize = EmojiSize.status,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .clickable { onPick(emoji) }
@@ -1739,6 +1949,13 @@ private fun ReactionSheet(
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // Copy leads the row: after reacting, it's the most common thing anyone
+                    // does a message — quote it elsewhere, save a link, paste into a search.
+                    // Hidden for messages with no text (the hover cluster takes the same
+                    // stance) rather than offering a copy that copies nothing.
+                    if (row.onCopy != null) {
+                        TextButton(onClick = row.onCopy) { Text("Copy") }
+                    }
                     // Edit: authors only. The server enforces it too, but hiding the affordance
                     // for other people's messages is what stops a user from composing an edit
                     // only to have it bounce.
@@ -1764,6 +1981,10 @@ private fun ReactionSheet(
 /**
  * The non-reaction actions for the long-pressed message. A class rather than a pile of
  * nullable lambdas so a missing action is a missing row item, not a dead button.
+ *
+ * [onCopy] nullable because the hover cluster hides the copy button for messages with no
+ * text (attachments only) — the sheet takes the same stance rather than offering a copy
+ * that copies nothing.
  */
 class MessageSheetActions(
     val canEdit: Boolean,
@@ -1771,7 +1992,34 @@ class MessageSheetActions(
     val onEdit: () -> Unit,
     val onDelete: () -> Unit,
     val onTogglePin: () -> Unit,
+    val onCopy: (() -> Unit)? = null,
 )
+
+@Composable
+private fun DeleteMessageDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete message?") },
+        text = {
+            DialogKeys(onDismiss = onDismiss) {
+                Text(
+                    "Are you sure you want to delete this message? This action cannot be undone.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                ),
+            ) { Text("Delete") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
 
 /**
  * "Orbit is typing" with three pulsing dots.
@@ -1855,10 +2103,9 @@ private fun SkeletonMessages() {
 }
 
 /**
- * The sidebar's drag handle: 10dp wide, visually a 1dp hairline, cursor changes on hover.
- *
- * The width is persisted per device (`AppState.sidebarWidthDp`) — a 13-inch laptop and a
- * 34-inch monitor want different answers, and that's exactly why this isn't a synced setting.
+ * The sidebar's drag handle: 10dp wide, visually a 1dp hairline that thickens and
+ * recolours on hover. Three dots in the centre give it a visible grip affordance —
+ * the previous version was invisible until hovered, which reads as no handle at all.
  */
 @Composable
 private fun ResizableDivider(widthDp: Int, onResize: (Int) -> Unit) {
@@ -1879,13 +2126,12 @@ private fun ResizableDivider(widthDp: Int, onResize: (Int) -> Unit) {
                 ) { change, dragAmount ->
                     change.consume()
                     accumulated += dragAmount.x
-                    // Deltas arrive in pixels; the width is in dp. The density is read at
-                    // composition time, which is the frame the pointer is in.
                     onResize(startWidth + (accumulated / density.density).toInt())
                 }
             },
         contentAlignment = Alignment.Center,
     ) {
+        // The line
         Box(
             Modifier
                 .width(if (hover) 2.dp else 1.dp)
@@ -1895,6 +2141,23 @@ private fun ResizableDivider(widthDp: Int, onResize: (Int) -> Unit) {
                     else MaterialTheme.colorScheme.outline
                 )
         )
+        // Grip dots — three small circles stacked vertically, visible only on hover.
+        // Gives a visual clue that this edge is draggable without cluttering the rest.
+        if (hover) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                repeat(3) {
+                    Box(
+                        Modifier
+                            .size(3.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
+                    )
+                }
+            }
+        }
     }
 }
 

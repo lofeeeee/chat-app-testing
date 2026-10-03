@@ -39,6 +39,8 @@ fun GraphQLContext.principalOrNull(): Principal? = get<Principal>(PRINCIPAL_KEY)
 @Component
 class AuthInterceptor(
     private val accessTokens: AccessTokens,
+    private val wsRegistry: WebSocketSessionRegistry,
+    private val presence: app.singular.presence.PresenceService,
 ) : WebGraphQlInterceptor, WebSocketGraphQlInterceptor {
 
     override fun intercept(
@@ -80,9 +82,39 @@ class AuthInterceptor(
         // work before authentication. It authenticates itself with the request's poll secret
         // instead. Every other subscription resolver calls requirePrincipal() and fails here,
         // so the socket being open buys an attacker nothing but a rate-limited connection.
-        header?.let(::parseBearer)?.let { sessionInfo.attributes[PRINCIPAL_KEY] = it }
+        header?.let(::parseBearer)?.let { principal ->
+            sessionInfo.attributes[PRINCIPAL_KEY] = principal
+            // Registered for immediate eviction on revocation — see WebSocketSessionRegistry.
+            wsRegistry.onConnected(principal.userId, sessionInfo)
+            // Connection IS the heartbeat now: a live authenticated socket is the strongest
+            // possible "this user is online", and publishing on the connect edge means other
+            // people see you come online immediately rather than after a POST arrives.
+            presence.heartbeat(principal.userId)
+            presence.publishPresenceChanged(principal.userId)
+        }
 
         return Mono.empty()
+    }
+
+    override fun handleConnectionClosed(
+        sessionInfo: WebSocketSessionInfo,
+        statusCode: Int,
+        connectionInitPayload: MutableMap<String, Any>,
+    ) {
+        wsRegistry.onDisconnected(sessionInfo)
+        // Mirror of the connect edge: prompt OFFLINE. One user can hold several sockets on
+        // one node (phone + desktop both connected here), so the node's heartbeat may only
+        // go away with the LAST of them — onDisconnected above has already removed this
+        // socket from the registry, so the check below sees what remains.
+        (sessionInfo.attributes[PRINCIPAL_KEY] as? Principal)?.let { principal ->
+            if (!wsRegistry.hasSocketsFor(principal.userId)) {
+                presence.disconnect(principal.userId)
+            }
+            // Publish even when other sockets remain: the prompt-to-recheck model means a
+            // superfluous event resolves to the same verdict, and skipping it on a
+            // last-socket-mistaken-for-not-last path would strand a stale ONLINE.
+            presence.publishPresenceChanged(principal.userId)
+        }
     }
 
     private fun parseBearer(header: String): Principal? {

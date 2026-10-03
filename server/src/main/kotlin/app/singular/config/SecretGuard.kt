@@ -15,8 +15,16 @@ import org.springframework.stereotype.Component
  * runs with a secret printed in the repository is the deployment mistake nobody notices until
  * it is the incident.
  *
- * The check is keyed on the `prod` profile being active. There is no `dev`-profile opt-out to
- * toggle: running with the dev secrets IS development, and everything else must fail loudly.
+ * ## Which profiles count as "development"
+ *
+ * Explicitly an allowlist of `dev` / `local` / `test` — NOT "anything that isn't `prod`".
+ * Keying on the absence of `prod` was the original shape, and it has the exact failure mode
+ * this class exists to prevent: a deployment that forgets to set the profile (or sets it to
+ * `staging`, `eu-west`, anything) sails through with repository-printed secrets. The operator
+ * must *declare* development, not merely fail to declare production.
+ *
+ * There is no flag to opt out: running with the dev secrets IS development, and everything
+ * else must fail loudly.
  *
  * Both fail-fast checks live here rather than in [SingularProperties] `init` blocks because
  * properties bind before profiles' semantics matter — the application context is the first
@@ -29,7 +37,7 @@ class SecretGuard(
 ) : ApplicationListener<ApplicationReadyEvent> {
 
     override fun onApplicationEvent(event: ApplicationReadyEvent) {
-        if (!env.activeProfiles.contains("prod")) return
+        if (env.activeProfiles.isEmpty() || env.activeProfiles.any { it.lowercase() in DEV_PROFILES }) return
 
         val problems = buildList {
             if (props.auth.tokenSecret == DEV_TOKEN_SECRET) {
@@ -42,13 +50,18 @@ class SecretGuard(
         if (problems.isNotEmpty()) {
             problems.forEach { LOG.error("REFUSING TO SERVE: {}", it) }
             throw IllegalStateException(
-                "Production profile is active but development secrets are in use. " +
-                    "Set SINGULAR_TOKEN_SECRET and SINGULAR_PEPPER to real values and restart."
+                "Development secrets are in use but no development profile is active " +
+                    "(active: ${env.activeProfiles.toList()}). Development is an allowlist " +
+                    "(dev/local/test), not the absence of prod. Set SINGULAR_TOKEN_SECRET and " +
+                    "SINGULAR_PEPPER to real values and restart."
             )
         }
     }
 
     private companion object {
+        /** Profiles that explicitly declare "this machine is a developer's machine". */
+        val DEV_PROFILES = setOf("dev", "local", "test")
+
         const val DEV_TOKEN_SECRET = "dev-only-insecure-token-secret-change-me-now"
         const val DEV_PEPPER = "dev-only-insecure-pepper-change-me-now"
         val LOG = LoggerFactory.getLogger(SecretGuard::class.java)!!

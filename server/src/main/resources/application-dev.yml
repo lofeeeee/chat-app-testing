@@ -1,0 +1,9 @@
+# Active with `--spring.profiles.active=dev` — the local-development allowlist profile.
+#
+# This is the same allowlist SecretGuard uses: declaring `dev` is what makes dev secrets and
+# GraphiQL acceptable on this machine. Anything else (no profile, prod, staging) gets the
+# locked-down defaults from application.yml.
+spring:
+  graphql:
+    graphiql:
+      enabled: true

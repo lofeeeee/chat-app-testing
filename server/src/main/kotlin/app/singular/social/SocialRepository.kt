@@ -25,6 +25,13 @@ data class UserSettings(
     val themeSecondary: Int?,
     val themeDark: Boolean?,
     val themePreset: String? = null,
+    /**
+     * Enter-to-send (true) versus Shift+Enter-to-send (false), synced per account.
+     *
+     * Null = never set = the client default (Enter sends). Terminal/IRC-lineage users flip
+     * this so Enter makes a newline instead.
+     */
+    val enterToSend: Boolean? = null,
 )
 
 /** The user's chosen status, as opposed to what others currently see. */
@@ -162,6 +169,7 @@ class SocialRepository(private val jdbc: JdbcClient, private val json: ObjectMap
                 themeSecondary = rs.getObject("theme_secondary") as Int?,
                 themeDark = rs.getObject("theme_dark") as Boolean?,
                 themePreset = readExtra(rs.getString("extras"), "themePreset"),
+                enterToSend = readExtraBoolean(rs.getString("extras"), "enterToSend"),
             )
         }
         .optional()
@@ -183,12 +191,36 @@ class SocialRepository(private val jdbc: JdbcClient, private val json: ObjectMap
         return value.takeIf { !it.isNull }?.asText()
     }
 
+    /**
+     * Reads one boolean out of the `extras` jsonb — same tolerance as [readExtra]: a missing
+     * column, malformed JSON, or a non-boolean node all read as "absent", never as false.
+     * (`asText` on a boolean node gives "true"/"false", so a value stored by another client
+     * as a string still round-trips.)
+     */
+    private fun readExtraBoolean(raw: String?, key: String): Boolean? {
+        val text = raw?.takeIf { it.isNotBlank() } ?: return null
+        val node = runCatching { json.readTree(text) }.getOrNull() ?: return null
+        val value = node.get(key) ?: return null
+        return when {
+            value.isBoolean -> value.asBoolean()
+            value.isTextual -> value.asText().toBooleanStrictOrNull()
+            else -> null
+        }
+    }
+
     fun saveSettings(userId: Long, s: UserSettings) {
         // Built in Kotlin rather than with jsonb_build_object(:preset) so the SQL never has to
         // infer the type of a nullable text parameter — which Postgres resolves as "unknown"
         // inside a function call and rejects.
+        //
+        // Each extras key is built separately so one feature's save can't clobber another's:
+        // a null field means "leave the stored value" (the same convention as the whole
+        // mutation), and the matching subtraction strips the key only on an explicit
+        // clear-back-to-default.
         val presetNode = s.themePreset?.let { json.writeValueAsString(mapOf("themePreset" to it)) }
         val clearPreset = s.themePreset == null
+        val enterNode = s.enterToSend?.let { json.writeValueAsString(mapOf("enterToSend" to it)) }
+        val clearEnter = s.enterToSend == null
 
         jdbc.sql(
             """
@@ -202,12 +234,12 @@ class SocialRepository(private val jdbc: JdbcClient, private val json: ObjectMap
                 -- Merge, never overwrite. `extras` is the client's bag and future features will
                 -- put their own keys in it (server folders, notification levels). A plain
                 -- assignment here would silently delete them the first time someone changed
-                -- their theme. `||` is a shallow merge, which is the whole point.
-                extras          = CASE
-                    WHEN :clear THEN COALESCE(user_settings.extras, '{}'::jsonb) - 'themePreset'
-                    ELSE COALESCE(user_settings.extras, '{}'::jsonb)
-                         || CAST(COALESCE(:preset, '{}') AS jsonb)
-                END,
+                -- their theme. `||` is a shallow merge; the text[] subtraction is the
+                -- "explicitly cleared back to default" path for whichever fields asked.
+                extras          = (COALESCE(user_settings.extras, '{}'::jsonb)
+                     || CAST(COALESCE(:preset, '{}') AS jsonb)
+                     || CAST(COALESCE(:enter, '{}') AS jsonb))
+                     - CAST(:clearKeys AS text[]),
                 updated_at      = now()
             """
         )
@@ -217,7 +249,17 @@ class SocialRepository(private val jdbc: JdbcClient, private val json: ObjectMap
         .param("s", s.themeSecondary)
         .param("dark", s.themeDark)
         .param("preset", presetNode)
-        .param("clear", clearPreset)
+        .param("enter", enterNode)
+        // A Postgres array literal ('{}' or '{themePreset,enterToSend}'), cast to text[] in
+        // the SQL. Binding a Kotlin collection here would give JdbcClient a type it can't
+        // infer for the `-` operator, so the literal is built in Kotlin and cast server-side.
+        .param(
+            "clearKeys",
+            buildList {
+                if (clearPreset) add("themePreset")
+                if (clearEnter) add("enterToSend")
+            }.joinToString(",", "{", "}"),
+        )
         .update()
     }
 

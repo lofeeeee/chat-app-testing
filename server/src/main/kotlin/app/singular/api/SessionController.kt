@@ -38,6 +38,12 @@ class SessionController(
         val revoked = sessions.revokeFamilyForUser(id, principal.userId)
         if (revoked == 0) throw InvalidInput("That device isn't signed in.")
 
+        // No socket eviction here, deliberately — the same limitation as revokeOtherSessions:
+        // the registry is user-keyed, so closing sockets would take the caller's own
+        // connection down with the target's, and a user revoking their old laptop must not
+        // sign themselves out. The target's access still ends at its next token refresh.
+        // When the registry learns per-session keys, this becomes a targeted close.
+
         audit.record(
             principal.userId,
             AuditAction.SESSION_REVOKED,
@@ -61,6 +67,11 @@ class SessionController(
             sessionId = principal.sessionId,
             changes = mapOf("scope" to "all-others", "sessionsRevoked" to revoked),
         )
+        // Note: no socket eviction here, deliberately. The registry is keyed by user, so
+        // closing "other" sessions' sockets would close this caller's own socket too and
+        // the client would treat its own revoke-others as being signed out. When the
+        // registry learns per-session keys (the client sends its sessionId at connection
+        // init), this becomes a targeted close.
         return revoked
     }
 
